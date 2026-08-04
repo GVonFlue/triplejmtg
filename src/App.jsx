@@ -3723,7 +3723,7 @@ function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoic
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
         <button className="btn btn-p" onClick={exportAll}><Download size={15}/>Export full backup (JSON)</button>
         <label className="btn btn-g" style={{cursor:'pointer'}}><Upload size={15}/>Restore from backup<input type="file" accept="application/json,.json" onChange={importAll} style={{display:'none'}}/></label>
-        <button className="btn btn-d" onClick={()=>{if(window.confirm('Reset to the sample demo leads? Export a backup first if you want to keep current data.'))saveLeads(seed());}}><Trash2 size={15}/>Reset to seed leads</button>
+        <button className="btn btn-d" onClick={()=>{if(window.confirm('Delete ALL leads and start with a completely empty CRM? This cannot be undone. Use this right before handing the CRM to the client. (Export a backup first if you want to keep the demo data.)'))saveLeads([]);}}><Trash2 size={15}/>Delete all data (start empty)</button>
       </div>
     </div>
 
