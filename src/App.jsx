@@ -1520,7 +1520,22 @@ const Brand=({logo,sub,size})=>{ const src=logo||'/triplejmortgagelogo.png';
 /* ===================== login ===================== */
 function Login(){
   const [u,setU]=useState('');const [p,setP]=useState('');const [err,setErr]=useState('');const [busy,setBusy]=useState(false);
-  const go=async()=>{ if(!u||!p){setErr('Enter your username and password.');return;} setBusy(true);setErr(''); try{ const {error}=await auth.login(u,p); if(error)setErr('Wrong username or password.'); }catch(e){ setErr('Could not sign in. Check your connection.'); } setBusy(false); };
+  const go=async()=>{
+    if(!u||!p){setErr('Enter your username and password.');return;}
+    setBusy(true);setErr('');
+    try{
+      const {error}=await auth.login(u,p);
+      if(error){
+        const m=(error.message||'').toLowerCase();
+        if(m.includes('email not confirmed')) setErr('This account isn’t confirmed yet in Supabase. Open Authentication → Users, and either check "Auto Confirm User" was on when it was created, or click the account and confirm it manually.');
+        else if(m.includes('invalid login credentials')) setErr(u.includes('@')
+          ? 'Wrong email or password.'
+          : `Wrong username or password. Note: as a bare username this signs in as "${u}@${BRAND.authDomain}" — if the account in Supabase was created with a different email, type that full email address here instead.`);
+        else setErr(error.message||'Could not sign in.');
+      }
+    }catch(e){ setErr('Could not reach the database — double-check the Supabase URL/key in the environment variables. ('+(e.message||e)+')'); }
+    setBusy(false);
+  };
   return (<><style>{CSS}</style><div className="gate"><div className="gate-card">
     <span className="nucleus" style={{width:18,height:18,margin:'0 auto 12px',display:'block'}}/>
     <h2>{BRAND.title}</h2><p>Sign in</p>
@@ -3591,7 +3606,7 @@ function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoic
     {/* google calendar */}
     <div className="card" style={{marginBottom:18}}>
       <div className="sec-title"><CalendarClock size={15}/>Google Calendar</div>
-      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Connect a Google account so meetings you book on a lead post automatically to that calendar. Use <b>admin@getproytech.com</b> when the Google sign-in appears.</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Connect your Google account so meetings you book on a lead post automatically to your calendar.</div>
       {gcal&&gcal.connected
         ? <div className="gcal-on"><div className="gcal-dot"/><div><b>Connected{gcal.email?` — ${gcal.email}`:''}</b><div className="subcell">Meetings booked on a lead land here automatically.</div></div><button className="btn btn-g btn-sm" style={{marginLeft:'auto'}} onClick={onDisconnectGcal}>Disconnect</button></div>
         : <div className="gcal-off"><button className="btn btn-p" onClick={()=>{window.location.href='/api/google-auth';}}><CalendarClock size={15}/>Connect Google Calendar</button><span className="subcell">You’ll approve once, then you’re set.</span></div>}
@@ -3859,7 +3874,7 @@ function MeetingScheduler({lead,gcalConnected,onSchedule}){
     setBusy(false);
   };
   return (<div className="mtg-form">
-    {!gcalConnected&&<div className="mtg-warn"><AlertTriangle size={13}/><span>Google Calendar isn’t connected. Open <b>Settings → Google Calendar</b> and hit Connect to push meetings to admin@getproytech.com.</span></div>}
+    {!gcalConnected&&<div className="mtg-warn"><AlertTriangle size={13}/><span>Google Calendar isn’t connected. Open <b>Settings → Google Calendar</b> and hit Connect to push meetings to your calendar.</span></div>}
     <div className="mtype-row">{MEETING_TYPES.map(t=><button key={t} type="button" className={'mtype'+(mtype===t?' on':'')} onClick={()=>setMtype(t)}>{t}</button>)}</div>
     <div className="fgrid">
       <div className="field full"><label>Title</label><input value={title} onChange={e=>setTitle(e.target.value)} placeholder={`${mtype} with ${lead.name||lead.company||'client'}`}/></div>
