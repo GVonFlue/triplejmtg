@@ -1,0 +1,4349 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend, AreaChart, Area
+} from 'recharts';
+import {
+  LayoutDashboard, KanbanSquare, Contact2, Building2, DollarSign, Settings,
+  Menu, Plus, X, Phone, Mail, Globe, Flag, Search, Trash2, Download, Upload,
+  MessageSquare, PhoneCall, CalendarClock, StickyNote, Mailbox, Lock, Repeat,
+  CheckCircle2, Circle, AlertTriangle, ArrowUpDown, Percent, Target, Award, Rocket, UserCheck,
+  Image as ImageIcon, GripVertical, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, List, SlidersHorizontal,
+  Layers, FileText, Tag, LogOut, Receipt, Printer, Send, Bell, Sparkles,
+  BookText, Wallet, ArrowDownLeft, ArrowUpRight, Paperclip, FileDown, Loader2, ListTodo,
+  Users, Link2, UserPlus, Expand, Video, CalendarCheck, Zap, Clipboard
+} from 'lucide-react';
+import JSZip from 'jszip';
+import { auth, db, configured } from './lib/supabase';
+import { BRAND } from './lib/brand';
+
+/* ===================== brand ===================== */
+const COBALT=BRAND.colors.cobalt, INDIGO=BRAND.colors.indigo, INK=BRAND.colors.ink, GOLD=BRAND.colors.gold, GREEN=BRAND.colors.green, RED=BRAND.colors.red;
+const PIE=[COBALT,INDIGO,GOLD,'#5C76EE','#8E86C9',GREEN,'#D98A3D','#7AA0F0'];
+const STAGE_COLORS=['#6B73C9',COBALT,'#7A5CC8',GOLD,GREEN,'#B0606A','#D98A3D','#2BA7A0'];
+
+/* ===================== editable defaults ===================== */
+const DEFAULT_OPTIONS={
+  /* where the borrower came from — the sources a loan officer actually sees */
+  source:['Past Client','Realtor Partner','Repeat / Referral','Website','Online (Zillow)','Social Media','Open House','Builder','Financial Planner','Other'],
+  nextAction:['Call borrower','Send pre-qual link','Collect docs','Send pre-approval','Lock rate','Order appraisal','Check on conditions','Follow Up','—'],
+  owner:[...BRAND.team,BRAND.pool],
+};
+const DEFAULT_STAGES=[
+  {key:'new',      label:'New Lead',      color:'#6B73C9', prob:0.10, open:true,  won:false, lost:false},
+  {key:'discovery',label:'Discovery',     color:COBALT,    prob:0.30, open:true,  won:false, lost:false},
+  {key:'proposal', label:'Proposal Sent', color:GOLD,      prob:0.70, open:true,  won:false, lost:false},
+  {key:'signed',   label:'Signed',        color:GREEN,     prob:1.00, open:false, won:true,  lost:false},
+  {key:'lost',     label:'Lost',          color:'#B0606A', prob:0.00, open:false, won:false, lost:true},
+];
+/* old default set — used to detect a pre-migration install */
+const OLD_STAGE_KEYS=['new','contacted','meeting','proposal','won','lost'];
+const STAGE_REMAP={new:'new',contacted:'discovery',meeting:'discovery',proposal:'proposal',won:'signed',lost:'lost'};
+
+/* ---- Layer 2: client phase + universal onboarding checklist ---- */
+const CLIENT_PHASES=[
+  ['intake','Intake','#6B73C9'],['build','Build',COBALT],['launch','Launch','#7A5CC8'],
+  ['active','Active',GREEN],['atrisk','At Risk','#E0662B'],['churned','Churned','#8E89A8'],
+];
+const PHASE_FLOW=['intake','build','launch','active'];   // the advance path
+const phaseMeta=k=>CLIENT_PHASES.find(p=>p[0]===k)||['intake','Intake','#6B73C9'];
+/* editable standard phases (label/color/order in Settings; keys locked to the checklist) */
+const DEFAULT_CLIENT_PHASES=[
+  {key:'intake',label:'Intake',color:'#6B73C9',flow:true},
+  {key:'build', label:'Build', color:COBALT,   flow:true},
+  {key:'launch',label:'Launch',color:'#7A5CC8',flow:true},
+  {key:'active',label:'Active',color:GREEN,    flow:true},
+  {key:'atrisk',label:'At Risk',color:'#E0662B',terminal:true},
+  {key:'churned',label:'Churned',color:'#8E89A8',terminal:true},
+];
+const stdPhases=settings=>(settings&&settings.clientPhases&&settings.clientPhases.length)?settings.clientPhases:DEFAULT_CLIENT_PHASES;
+/* the first phase a loan file lands in when it starts processing, and the set of terminal phases */
+const firstPhaseKey=settings=>{ const p=stdPhases(settings); return (p[0]&&p[0].key)||'intake'; };
+const terminalPhaseKeys=settings=>new Set(stdPhases(settings).filter(p=>p.terminal).map(p=>p.key));
+/* a client's own ordered phase list = standard phases + that client's custom phases spliced in after their `after` key */
+const clientPhaseList=(settings,client)=>{ const std=stdPhases(settings); const custom=((client&&client.customPhases)||[]).map(c=>({...c,custom:true})); const out=[];
+  std.forEach(p=>{ out.push(p); custom.filter(c=>c.after===p.key).forEach(c=>out.push(c)); });
+  custom.filter(c=>!out.some(o=>o.key===c.key)).forEach(c=>out.push(c));
+  return out; };
+const phaseInfo=(key,settings,client)=>clientPhaseList(settings,client).find(p=>p.key===key)||stdPhases(settings).find(p=>p.key===key)||{key,label:key,color:'#6B73C9'};
+/* advance path for one client: flow std phases + their custom phases, terminals excluded */
+const flowOrder=(settings,client)=>clientPhaseList(settings,client).filter(p=>p.flow||p.custom).map(p=>p.key);
+/* board columns = standard phases with every visible client's custom phases inserted after their `after`.
+   A custom column is derived from one client's data, so it only ever appears for that client. */
+const boardCols=(clients,settings)=>{ const std=stdPhases(settings); const out=[]; const byAfter={};
+  (clients||[]).forEach(c=>((c.customPhases)||[]).forEach(cp=>{ (byAfter[cp.after]=byAfter[cp.after]||[]).push({...cp,custom:true,ownerId:c.id}); }));
+  std.forEach(p=>{ out.push(p); (byAfter[p.key]||[]).forEach(cp=>out.push(cp)); });
+  Object.entries(byAfter).forEach(([after,list])=>{ if(!std.some(p=>p.key===after)) list.forEach(cp=>{ if(!out.some(o=>o.key===cp.key)) out.push(cp); }); });
+  return out; };
+const ONBOARDING=[
+  {phase:'intake',items:[
+    ['agreement_signed','Service agreement signed (Square)'],
+    ['deposit_paid','Deposit / first payment collected'],
+    ['drive_folder','Client folder created in Drive'],
+    ['welcome_sent','Welcome msg + /onboard link sent'],
+    ['intake_form','Intake form completed (/onboard)'],
+    ['logo_received','Logo received (vector/PNG)'],
+    ['headshot_received','Headshot(s) received'],
+    ['brand_assets','Brand colors / assets received'],
+    ['testimonials','Testimonials/reviews received or permission'],
+    ['access_dns','Access: domain / DNS'],
+    ['access_gbp','Access: Google Business Profile'],
+    ['access_social','Access: Facebook / Instagram'],
+    ['access_crm_host','Access: existing CRM / host (if any)'],
+    ['brand_voice_doc','Brand Voice Doc produced'],
+    ['kickoff_call','Kickoff call + voice memo done'],
+  ]},
+  {phase:'build',items:[
+    ['site_built','Website built (preview URL)'],
+    ['revision_round','Revision round collected (one consolidated list)'],
+    ['automations_config','Automations configured (GHL snapshot + Custom Values)'],
+    ['newsletter_setup','Newsletter set up (if sold)'],
+    ['qa_passed','Internal QA passed (forms, automations, mobile, links, license/brokerage disclosure, Equal Housing logo)'],
+  ]},
+  {phase:'launch',items:[
+    ['launch_call','Launch call completed'],
+    ['go_live','Go live (DNS flipped, automations on)'],
+    ['cheat_sheet_sent',"'How your system works' cheat sheet sent"],
+    ['review_scheduled','30-day review scheduled'],
+    ['testimonial_booked','Testimonial / case study booked (founding clients)'],
+    ['retainer_confirmed','First retainer auto-bill confirmed (Square)'],
+  ]},
+  {phase:'active',items:[
+    ['day30_review','Day-30 review call done (results, testimonial, 2 warm intros)'],
+  ]},
+];
+/* the 27-item default, flattened. Existing installs keep exactly this set. */
+const DEFAULT_ONB_ITEMS=ONBOARDING.flatMap(g=>g.items.map(([key,label])=>({key,label,phase:g.phase})));
+/* the LIVE checklist: settings.onboardingItems when defined, else the default.
+   Every consumer reads through this so a client install can define its own. */
+const onbItemsOf=settings=>{ const it=settings&&settings.onboardingItems; return (Array.isArray(it)&&it.length)?it:DEFAULT_ONB_ITEMS; };
+/* [{phase,items}] groups in first-seen phase order — for the grouped checklist UI */
+const onbGroups=items=>{ const order=[]; const by={}; (items||[]).forEach(i=>{ if(!by[i.phase]){by[i.phase]=[];order.push(i.phase);} by[i.phase].push(i); }); return order.map(phase=>({phase,items:by[phase]})); };
+const onbByPhase=(items,phase)=>(items||DEFAULT_ONB_ITEMS).filter(i=>i.phase===phase);
+const seedOnboarding=items=>{const o={};(items||DEFAULT_ONB_ITEMS).forEach(i=>o[i.key]={done:null,due:null});return o;};
+/* progress for one phase's checklist (mirrors trackProgress) */
+const phaseProgress=(lead,phase,items)=>{ const its=onbByPhase(items||DEFAULT_ONB_ITEMS,phase); const ob=lead.onboarding||{}; let done=0,overdue=0,nextDue=null,next=null;
+  its.forEach(i=>{ const e=normEntry(ob[i.key]); if(e.done) done++; else { if(!next) next=i; if(e.due){ if(daysUntil(e.due)<0) overdue++; if(!nextDue||e.due<nextDue) nextDue=e.due; } } });
+  return {items:its,done,total:its.length,pct:its.length?done/its.length:0,overdue,nextDue,next}; };
+/* whole-checklist stats (mirrors clientOverall) */
+const onboardingStat=(lead,items)=>{ const its=items||DEFAULT_ONB_ITEMS; const ob=lead.onboarding||{}; let done=0,overdue=0,nextDue=null,next=null;
+  its.forEach(i=>{ const e=normEntry(ob[i.key]); if(e.done) done++; else { if(!next) next=i; if(e.due){ if(daysUntil(e.due)<0) overdue++; if(!nextDue||e.due<nextDue) nextDue=e.due; } } });
+  return {done,total:its.length,pct:its.length?done/its.length:0,overdue,nextDue,next}; };
+/* one-time, idempotent pipeline migration: pre-migration installs (empty or the
+   old 6-key default) get the new 5 stages, and every lead's stage key is remapped.
+   Safe to run on every load — a no-op once migrated. */
+function migrateStages(settings,leads){
+  const cur=(settings&&settings.stages)||[]; const curKeys=cur.map(s=>s.key);
+  const looksOld=!curKeys.length || (curKeys.length===OLD_STAGE_KEYS.length && OLD_STAGE_KEYS.every(k=>curKeys.includes(k)));
+  const stages=looksOld?DEFAULT_STAGES:cur;
+  const valid=new Set(stages.map(s=>s.key));
+  const changed=[];
+  const migLeads=(leads||[]).map(l=>{
+    if(!l.stage||valid.has(l.stage)) return l;
+    const to=STAGE_REMAP[l.stage]||'new';
+    const nl={...l,stage:valid.has(to)?to:'new'}; changed.push(nl); return nl;
+  });
+  return {stages,stagesChanged:looksOld,leads:migLeads,changed};
+}
+
+/* ===================== presets =====================
+   A preset is the same code with different settings. Applying one rewrites
+   the stage keys / phase keys on existing rows so nothing is orphaned. */
+/* ---- Triple J Mortgage taxonomy ----------------------------------------
+   ONE ordered list is the single source of truth for every number in the CRM.
+   Each stage carries a `group` so the two boards and the dashboard Pipeline
+   Status widget are just VIEWS of this one array — they can never disagree with
+   the KPI tiles because they all read these same records.
+     group          money meaning              flag
+     Prospect       open pipeline (a lead)      open:true
+     Processing     open pipeline (a live loan) open:true
+     Closing        open pipeline (a live loan) open:true
+     Funded         realized / funded revenue   won:true
+     (Withdrawn/Lost) dead                      lost:true
+   The Leads board renders group==='Prospect'; the Loan board renders the rest;
+   a borrower "graduates" from Pre-Approved into Loan Setup when under contract. */
+const STAGE_GROUPS=['Prospect','Processing','Closing','Funded'];
+const LENDER_STAGES=[
+  // Prospect — the Leads pipeline (Lead/New is where a first conversation is logged)
+  {key:'lead',        label:'Lead / New',            group:'Prospect',   color:'#6B73C9', prob:0.05, open:true,  won:false, lost:false},
+  {key:'appintake',   label:'App Intake',            group:'Prospect',   color:'#5B6BD6', prob:0.12, open:true,  won:false, lost:false},
+  {key:'qualification',label:'Qualification',        group:'Prospect',   color:'#7A5CC8', prob:0.30, open:true,  won:false, lost:false},
+  {key:'preapproved', label:'Pre-Approved',          group:'Prospect',   color:'#9B6FD0', prob:0.55, open:true,  won:false, lost:false},
+  // Processing — the Loan pipeline begins (under contract)
+  {key:'loansetup',   label:'Loan Setup',            group:'Processing', color:'#3F79C9', prob:0.70, open:true,  won:false, lost:false},
+  {key:'disclosed',   label:'Disclosed',             group:'Processing', color:'#3E86C0', prob:0.75, open:true,  won:false, lost:false},
+  {key:'submitteduw', label:'Submitted to UW',       group:'Processing', color:'#2F97B4', prob:0.82, open:true,  won:false, lost:false},
+  {key:'approvedcond',label:'Approved w/ Conditions', group:'Processing', color:'#2BA7A0', prob:0.88, open:true,  won:false, lost:false},
+  {key:'resubmittal', label:'Re-Submittal',          group:'Processing', color:'#38A78B', prob:0.85, open:true,  won:false, lost:false},
+  // Closing
+  {key:'cleartoclose',label:'Clear to Close',        group:'Closing',    color:'#C9A227', prob:0.95, open:true,  won:false, lost:false},
+  {key:'docsout',     label:'Docs Out',              group:'Closing',    color:'#D98A3D', prob:0.97, open:true,  won:false, lost:false},
+  {key:'docssigned',  label:'Docs Signed',           group:'Closing',    color:'#E0A63D', prob:0.99, open:true,  won:false, lost:false},
+  // Funded — realized revenue (all three count as funded)
+  {key:'loanfunded',  label:'Loan Funded',           group:'Funded',     color:'#3E9E5E', prob:1.00, open:false, won:true,  lost:false},
+  {key:'brokercheck', label:'Broker Check Received', group:'Funded',     color:'#4CA86A', prob:1.00, open:false, won:true,  lost:false},
+  {key:'loanfinalized',label:'Loan Finalized',       group:'Funded',     color:'#57B377', prob:1.00, open:false, won:true,  lost:false},
+  // Terminal
+  {key:'withdrawn',   label:'Withdrawn',             group:null,         color:'#8E89A8', prob:0.00, open:false, won:false, lost:true},
+  {key:'lost',        label:'Lost',                  group:null,         color:'#B0606A', prob:0.00, open:false, won:false, lost:true},
+];
+const LENDER_CLIENT_PHASES=[
+  {key:'processing',  label:'Processing',           color:'#6B73C9', flow:true},
+  {key:'underwriting',label:'Underwriting',         color:COBALT,    flow:true},
+  {key:'conditional', label:'Conditional Approval', color:'#7A5CC8', flow:true},
+  {key:'cleartoclose',label:'Clear to Close',       color:GOLD,      flow:true},
+  {key:'closed',      label:'Closed',               color:GREEN,     flow:true},
+  {key:'stalled',     label:'Stalled',              color:'#E0662B', terminal:true},
+  {key:'withdrawn',   label:'Withdrawn',            color:'#8E89A8', terminal:true},
+];
+const LENDER_ONB_ITEMS=[
+  ['ln_app_signed','Application signed','processing'],
+  ['ln_income_docs','Income docs collected','processing'],
+  ['ln_asset_docs','Asset docs collected','processing'],
+  ['ln_homeowners','Homeowners insurance','processing'],
+  ['ln_title_ordered','Title ordered','processing'],
+  ['ln_appraisal_ordered','Appraisal ordered','processing'],
+  ['ln_submitted_uw','Submitted to underwriting','underwriting'],
+  ['ln_appraisal_recv','Appraisal received','underwriting'],
+  ['ln_title_recv','Title received','underwriting'],
+  ['ln_conditions_recv','Conditions received','conditional'],
+  ['ln_conditions_sent','Conditions sent to borrower','conditional'],
+  ['ln_conditions_cleared','Conditions cleared','conditional'],
+  ['ln_cd_issued','Closing disclosure issued','cleartoclose'],
+  ['ln_closing_scheduled','Closing scheduled','cleartoclose'],
+  ['ln_closing_complete','Closing complete','closed'],
+  ['ln_thankyou','Thank-you sent','closed'],
+  ['ln_referral_thanked','Referral partner thanked','closed'],
+].map(([key,label,phase])=>({key,label,phase}));
+/* modules a lender build ships without */
+const LENDER_MODULES_OFF=['invoices','books','money'];
+/* lender fulfillment track — the loan file moving to the closing table, instead
+   of the agency's Website / AI Integrations tracks */
+const LENDER_DELIVERY_TRACKS=[
+  { key:'loanfile', label:'Loan File', services:[], milestones:['Application taken','Processing','Submitted to underwriting','Conditional approval','Clear to close','Funded'] },
+];
+const PRESETS={
+  agency:{ key:'agency', label:'Agency (current)', stages:DEFAULT_STAGES, clientPhases:DEFAULT_CLIENT_PHASES, onboardingItems:DEFAULT_ONB_ITEMS, modulesOff:[] },
+  lender:{ key:'lender', label:'Lender',           stages:LENDER_STAGES,  clientPhases:LENDER_CLIENT_PHASES,  onboardingItems:LENDER_ONB_ITEMS,  modulesOff:LENDER_MODULES_OFF },
+};
+/* the settings a preset writes (leaves everything else — brand, options, goals — alone) */
+const presetSettingsPatch=preset=>({
+  stages:preset.stages, clientPhases:preset.clientPhases, onboardingItems:preset.onboardingItems,
+  /* lazy so DEFAULT_DELIVERY_TRACKS (defined later in the file) is resolved at call time, not module init */
+  deliveryTracks:preset.key==='lender'?LENDER_DELIVERY_TRACKS:DEFAULT_DELIVERY_TRACKS,
+  modules:ALL_MODULES.map(m=>m[0]).filter(k=>!preset.modulesOff.includes(k)), preset:preset.key,
+});
+/* remap old stage keys onto a target set by INTENT, exactly like migrateStages does:
+   open → first open, won → the won stage, lost → the lost stage. Returns oldKey→newKey. */
+const stageIntentMap=(oldStages,newStages)=>{
+  const firstOpen=(newStages.find(s=>s.open)||newStages[0]).key;
+  const won=(newStages.find(s=>s.won)||newStages[newStages.length-1]).key;
+  const lost=(newStages.find(s=>s.lost)||won).key;
+  const m={}; (oldStages||[]).forEach(s=>{ m[s.key]= s.won?won : s.lost?lost : firstOpen; }); return {m,firstOpen,won,lost};
+};
+/* phases have no won/lost — remap by clamped position within flow / terminal groups. */
+const phaseIntentMap=(oldPhases,newPhases)=>{
+  const newFlow=newPhases.filter(p=>p.flow), newTerm=newPhases.filter(p=>p.terminal);
+  const oldFlow=(oldPhases||[]).filter(p=>p.flow), oldTerm=(oldPhases||[]).filter(p=>p.terminal);
+  const m={};
+  oldFlow.forEach((p,i)=>{ const t=newFlow[Math.min(i,newFlow.length-1)]||newPhases[0]; m[p.key]=t.key; });
+  oldTerm.forEach((p,i)=>{ const t=newTerm[Math.min(i,newTerm.length-1)]||newTerm[0]||newPhases[0]; m[p.key]=t.key; });
+  return m;
+};
+/* count of leads whose stage key would change under this preset (for the confirm dialog) */
+const presetMoveCount=(leads,curStages,preset)=>{ const valid=new Set(preset.stages.map(s=>s.key));
+  return (leads||[]).filter(l=>l.stage&&!valid.has(l.stage)).length; };
+
+/* ---- lender lead fields ---- */
+const LOAN_TYPES=['Conventional','FHA','VA','USDA','Jumbo','Non-QM','Other'];
+const LOAN_PURPOSES=['Purchase','Refinance','Cash-Out Refi','Construction'];
+const PROPERTY_TYPES=['Single Family','Condo','Townhome','Multi-Family','Manufactured','Land'];
+/* expiring pre-approvals & rate locks — warn at 14 days, escalate past due. Dead
+   deals (lost) don't nag. Returns soonest-first, includes already-expired (days<0). */
+/* A "conversation" for the Conversations KPI = a logged two-way contact: a Call or a
+   Meeting activity. Notes/texts/emails are one-way and don't count toward the ratio. */
+const CONVO_TYPES=/^(call|meeting)$/i;
+const EXPIRY_KINDS=[['preApprovalExp','Pre-approval'],['rateLockExp','Rate lock']];
+const expiringList=(leads,stages,within=14)=>{ const out=[];
+  (leads||[]).forEach(l=>{ const st=sOf(l.stage,stages); if(st&&st.lost) return;
+    EXPIRY_KINDS.forEach(([k,label])=>{ const v=l[k]; if(!v) return; const d=daysUntil(v); if(d==null||d>within) return; out.push({lead:l,key:k,label,date:v,days:d}); }); });
+  return out.sort((a,b)=>a.days-b.days); };
+
+const PRIORITIES={high:{label:'High',color:'#E0662B',bg:'rgba(224,102,43,.12)',rank:0},medium:{label:'Medium',color:COBALT,bg:'rgba(43,77,224,.10)',rank:1},low:{label:'Low',color:'#8E89A8',bg:'#F0F1F7',rank:2}};
+const OWNERS=[...BRAND.team,BRAND.pool];
+/* ---- team scoping: everyone sees their own leads; "ProyTech" is the shared pool ---- */
+const POOL_OWNER=BRAND.pool;
+const DEFAULT_TEAM=BRAND.team.map(name=>({name,access:'all'}));
+const teamAccess=(settings,name)=>{ const t=(settings?.team||[]).find(x=>x.name===name); return t?t.access:'all'; };
+const scopeLeads=(list,view,me)=>{
+  if(view==='mine') return list.filter(l=>l.owner===me);
+  if(view==='pool') return list.filter(l=>l.owner===POOL_OWNER);
+  return list;
+};
+function ScopeSeg({view,setView,counts,canAll}){
+  return (<div className="seg scope-seg">
+    <button className={view==='mine'?'on':''} onClick={()=>setView('mine')}>Mine<i>{counts.mine}</i></button>
+    <button className={view==='pool'?'on':''} onClick={()=>setView('pool')}>Pool<i>{counts.pool}</i></button>
+    {canAll&&<button className={view==='all'?'on':''} onClick={()=>setView('all')}>All<i>{counts.all}</i></button>}
+  </div>);
+}
+const ACT_TYPES=[{key:'Booked',icon:CalendarCheck},{key:'Note',icon:StickyNote},{key:'Call',icon:PhoneCall},{key:'Text',icon:MessageSquare},{key:'Meeting',icon:CalendarClock},{key:'Email',icon:Mailbox}];
+/* 'Booked' is the canonical meeting-booked marker. Both the scheduler and the
+   composer button write this type, so every count in the app agrees. */
+/* sections that can be switched off per install. Dashboard + Settings always ship. */
+const ALL_MODULES=[['huddle','Monday Huddle'],['followup','Follow-Up'],['tasks','Tasks'],['activity','Activity'],['pipeline','Pipeline'],['leads','Leads'],['rels','Partners'],['clients','Loans'],['invoices','Invoices'],['books','The Books'],['money','Money']];
+const ALWAYS_ON=['dash','settings','aitools'];
+const modList=settings=>{ if(settings&&Array.isArray(settings.modules)) return settings.modules;
+  if(BRAND.modules&&BRAND.modules.length) return BRAND.modules; return ALL_MODULES.map(m=>m[0]); };
+/* modules a preset removes from the product entirely — not just off, but not
+   offered in the Sections toggles or the sidebar. The lender build has no
+   invoicing and no books (we don't sell those to lenders). */
+const lockedModules=settings=>(settings&&settings.preset==='lender')?['invoices','books']:[];
+const modOn=(settings,k)=>!lockedModules(settings).includes(k)&&(ALWAYS_ON.includes(k)||modList(settings).includes(k));
+/* meeting types — coffee and discovery are different motions, track them apart */
+const MEETING_TYPES=['Coffee','Discovery Call','Proposal / Pitch','Onboarding','Check-in','Other'];
+/* ---- Monday Morning Huddle -------------------------------------------------
+   Everything here is plain arithmetic on data already captured. The AI only
+   ever sees the finished digest, never the database. */
+const startOfWeek=d=>{ const x=new Date(d); const dow=(x.getDay()+6)%7; x.setDate(x.getDate()-dow); x.setHours(0,0,0,0); return x; };
+/* the last COMPLETE Mon-Sun, which is what you actually review on a Monday */
+const lastWeekRange=(now=new Date())=>{ const thisMon=startOfWeek(now);
+  const start=new Date(thisMon); start.setDate(thisMon.getDate()-7);
+  const end=new Date(thisMon); end.setMilliseconds(-1);
+  return {start,end,key:isoOf(start)}; };
+const shiftWeek=(r,weeks)=>{ const start=new Date(r.start); start.setDate(start.getDate()-7*weeks);
+  const end=new Date(r.end); end.setDate(end.getDate()-7*weeks); return {start,end,key:isoOf(start)}; };
+const inRange=(ts,r)=>{ if(!ts) return false; const t=new Date(String(ts).length<=10?ts+'T12:00:00':ts).getTime();
+  return !isNaN(t)&&t>=r.start.getTime()&&t<=r.end.getTime(); };
+const pctChange=(a,b)=>b===0?(a>0?null:0):Math.round((a-b)/b*100);
+
+/* one week's worth of counts */
+function weekSlice(leads,tasks,stages,r){
+  const acts={}; let booked=0,held=0,noshow=0,newLeads=0,closed=0,closedValue=0,onboarded=0,deposits=0,fuCleared=0,fuOnTime=0;
+  const bookedByType={}; const moves=[]; const wonNames=[]; const newClientNames=[];
+  (leads||[]).forEach(l=>{
+    const nm=l.name||l.company||'(unnamed)';
+    if(inRange(l.createdAt,r)) newLeads++;
+    if(sOf(l.stage,stages).won&&inRange(l.closedAt,r)){ closed++; closedValue+=num(l.dealValue); wonNames.push(nm+' ('+usd(l.dealValue)+')'); }
+    if(l.isClient&&inRange(l.convertedAt,r)){ onboarded++; newClientNames.push(nm); }
+    const dep=normEntry((l.onboarding||{}).deposit_paid).done; if(inRange(dep,r)) deposits++;
+    (l.activities||[]).forEach(a=>{ if(!inRange(a.ts,r))return;
+      const sys=a.text==='Lead created.'||(typeof a.text==='string'&&a.text.startsWith('Stage moved:'));
+      if(!sys) acts[a.type]=(acts[a.type]||0)+1;   // system notes aren't work done
+      if(a.type==='Booked'){ booked++; const t=a.mtype||'untyped'; bookedByType[t]=(bookedByType[t]||0)+1; }
+      if(a.fuOnTime!==undefined){ fuCleared++; if(a.fuOnTime) fuOnTime++; }
+      if(typeof a.text==='string'&&a.text.startsWith('Stage moved:')) moves.push(nm+': '+a.text.replace('Stage moved: ',''));
+    });
+    (l.meetings||[]).forEach(mt=>{ if(!inRange(mt.start,r))return; if(mt.status==='held')held++; else if(mt.status==='noshow')noshow++; });
+  });
+  const done=(tasks||[]).filter(t=>t.done&&inRange(t.doneAt,r));
+  const touches=(acts.Call||0)+(acts.Text||0)+(acts.Email||0)+(acts.Meeting||0);
+  return {activityCounts:acts,touches,booked,bookedByType,held,noshow,newLeads,closed,closedValue,onboarded,deposits,
+    fuCleared,fuOnTime,stageMoves:moves,wonNames,newClientNames,tasksDone:done.length,taskTitles:done.map(t=>t.title).slice(0,15)};
+}
+
+/* the full packet the huddle page renders and the AI interprets */
+function buildHuddle(leads,tasks,settings,stages,rels,now=new Date()){
+  const r=lastWeekRange(now), p=shiftWeek(r,1);
+  const cur=weekSlice(leads,tasks,stages,r), prev=weekSlice(leads,tasks,stages,p);
+  const G=goalsOf(settings); const mKey=isoOf(now).slice(0,7);
+  let mtdBooked=0,mtdClosed=0,mtdRevenue=0,mtdOnboarded=0;
+  (leads||[]).forEach(l=>{
+    (l.activities||[]).forEach(a=>{ if(a.type==='Booked'&&a.ts&&isoOf(new Date(a.ts)).slice(0,7)===mKey) mtdBooked++; });
+    if(sOf(l.stage,stages).won&&l.closedAt&&String(l.closedAt).slice(0,7)===mKey){ mtdClosed++; mtdRevenue+=num(l.dealValue); }
+    if(l.isClient&&l.convertedAt&&String(l.convertedAt).slice(0,7)===mKey) mtdOnboarded++;
+  });
+  const openLeads=(leads||[]).filter(l=>sOf(l.stage,stages).open);
+  const overdue=(leads||[]).filter(l=>l.followUp&&daysUntil(l.followUp)<0&&sOf(l.stage,stages).open)
+    .sort((a,b)=>(a.followUp||'').localeCompare(b.followUp||''));
+  const cold=coldList(rels||[]).slice(0,8);
+  const stalled=openLeads.map(l=>({l,d:daysSince(lastTouchTs(l)||l.createdAt||new Date().toISOString())}))
+    .filter(x=>x.d>=14).sort((a,b)=>b.d-a.d).slice(0,8);
+  const untouched=(leads||[]).filter(l=>!(l.activities||[]).some(REAL_TOUCH));
+  return {
+    period:{from:isoOf(r.start),to:isoOf(r.end),label:fmtDate(isoOf(r.start))+' – '+fmtDate(isoOf(r.end))},
+    lastWeek:cur, weekBefore:prev,
+    pipeline:{openDeals:openLeads.length,openValue:Math.round(openLeads.reduce((a,l)=>a+num(l.dealValue),0)),
+      weighted:Math.round(openLeads.reduce((a,l)=>a+num(l.dealValue)*num(sOf(l.stage,stages).prob),0)),
+      mrr:Math.round((leads||[]).filter(l=>l.retainerActive).reduce((a,l)=>a+num(l.retainer),0))},
+    monthToDate:{month:mKey,dayOfMonth:now.getDate(),pctOfMonthElapsed:Math.round(monthPace(now)*100),
+      booked:mtdBooked,closed:mtdClosed,revenue:mtdRevenue,onboarded:mtdOnboarded,
+      goals:{booked:G.booked,closed:G.closed,onboarded:G.onboarded,revenue:G.revenue,mrr:G.mrr}},
+    slipping:{
+      overdueFollowUps:overdue.slice(0,8).map(l=>({who:l.name||l.company,daysLate:Math.abs(daysUntil(l.followUp)),plan:l.nextSteps||l.nextAction||''})),
+      overdueTotal:overdue.length,
+      coldRelationships:cold.map(x=>({who:x.r.company||x.r.name,tier:tierMeta(x.tier)[1],daysSinceTouch:x.days>=9999?null:x.days})),
+      stalledDeals:stalled.map(x=>({who:x.l.company||x.l.name,value:num(x.l.dealValue),stage:sOf(x.l.stage,stages).label,daysSinceTouch:x.d})),
+      neverContacted:untouched.length,
+      /* lender pre-approvals / rate locks running out this week */
+      expiring:expiringList(leads,stages).slice(0,8).map(x=>({who:x.lead.company||x.lead.name,kind:x.label,date:x.date,days:x.days})),
+    },
+  };
+}
+/* monthly targets. 0 or missing = no goal, so nothing renders. */
+const DEFAULT_GOALS={booked:0,closed:0,onboarded:0,revenue:0,mrr:0};
+const GOAL_FIELDS=[
+  ['booked','Meetings booked','per month','n'],
+  ['closed','Loans funded','per month','n'],
+  ['onboarded','Loans started','per month','n'],
+  ['revenue','Funded volume','per month','$'],
+];
+const goalsOf=settings=>({...DEFAULT_GOALS,...((settings&&settings.goals)||{})});
+/* loan-officer compensation: a percent of the loan amount (basis points ÷ 100)
+   plus an optional flat amount per funded loan. Drives commission projections. */
+const DEFAULT_COMP={pct:1.0,flat:0};
+const compOf=settings=>({...DEFAULT_COMP,...((settings&&settings.comp)||{})});
+/* Per-loan commission: each loan may carry its OWN rate (lead.commPct / lead.commFlat).
+   When a loan doesn't set one, it falls back to the Settings default (comp). This is
+   how Jesse handles a rate that changes mid-year (e.g. first 12 funded at one %, higher
+   after) — he just sets the rate on those loans; everything else uses the default. */
+const hasVal=v=>v!==undefined&&v!==null&&v!=='';
+const loanPct=(lead,comp)=>hasVal(lead&&lead.commPct)?num(lead.commPct):num(comp.pct);
+const loanFlat=(lead,comp)=>hasVal(lead&&lead.commFlat)?num(lead.commFlat):num(comp.flat);
+const commissionOf=(lead,comp)=>num(lead&&lead.dealValue)*loanPct(lead,comp)/100+loanFlat(lead,comp);
+/* how far through the month we are — lets a tile say "behind pace" honestly */
+const monthPace=(d=new Date())=>{ const days=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
+  return Math.min(1,d.getDate()/days); };
+/* ---- health metrics ------------------------------------------------------
+   All derived from data already captured, so nothing new to type in. */
+const REAL_TOUCH=a=>a&&a.ts&&a.text!=='Lead created.';
+/* hours between a lead landing and the first real touch. null = never touched. */
+const firstTouchHrs=l=>{ const acts=(l.activities||[]).filter(REAL_TOUCH); if(!acts.length||!l.createdAt) return null;
+  const first=acts.reduce((mn,a)=>(!mn||a.ts<mn)?a.ts:mn,null);
+  const h=(new Date(first)-new Date(l.createdAt))/36e5; return isNaN(h)?null:Math.max(0,h); };
+const median=arr=>{ if(!arr.length) return null; const x=[...arr].sort((a,b)=>a-b); const i=Math.floor(x.length/2);
+  return x.length%2?x[i]:(x[i-1]+x[i])/2; };
+const fmtHrs=h=>h==null?'—':h<1?Math.round(h*60)+'m':h<48?Math.round(h)+'h':Math.round(h/24)+'d';
+const lastTouchTs=l=>{ const acts=(l.activities||[]).filter(a=>a&&a.ts); if(!acts.length) return l.createdAt||null;
+  return acts.reduce((mx,a)=>(!mx||a.ts>mx)?a.ts:mx,null); };
+/* champions need watering more often than brand-new contacts */
+const COLD_DAYS={champion:30,b:60,new:90};
+const coldList=rels=>(rels||[]).map(r=>{ const tier=tierOf(r); const last=lastTouchTs(r);
+    return {r,tier,last,days:last?daysSince(last):9999,limit:COLD_DAYS[tier]||90}; })
+  .filter(x=>x.days>=x.limit).sort((a,b)=>b.days-a.days);
+/* how far each lead ever got, read back out of the logged stage moves */
+/* ---- unified meetings + sales-ratio tracking (ported from the tracking work on main) ----
+   Every meeting counts once, whether it was scheduled or just logged from the
+   activity composer, and held/no-show is read from the same record everywhere.
+   This fixes the "2 booked" header over an empty meeting list, and stops a
+   meeting booked today for next month from landing in the wrong month. */
+const datelessOf=m=>m.dateUnknown!==undefined&&m.dateUnknown!==null
+  ? !!m.dateUnknown
+  : (!!m.logged&&!!m.start&&m.start===m.createdAt);
+const meetingsOf=l=>{
+  const existing=(l.meetings||[]).map(m=>({...m,status:m.status||'',dateUnknown:datelessOf(m)}));
+  const haveIds=new Set(existing.map(m=>m.id));
+  const linked=new Set(existing.map(m=>m.meetingId).filter(Boolean));
+  const fromActs=(l.activities||[])
+    .filter(a=>a&&a.type==='Booked'&&a.ts&&!a.meetingId&&!linked.has(a.id))
+    .map(a=>({ id:'m_'+a.id, fromActivity:a.id, title:(a.text||'Meeting').replace(/ booked:.*/i,'').replace(/ booked\.?$/i,'')||'Meeting',
+      mtype:a.mtype||'Other', start:a.ts, end:a.ts, status:a.status||'', who:a.who, createdAt:a.ts, logged:true, dateUnknown:true }))
+    .filter(m=>!haveIds.has(m.id));
+  return [...existing,...fromActs];
+};
+const meetingMonthKey=m=>m.start?isoOf(new Date(m.start)).slice(0,7):null;   // when it happens
+const bookingMonthKey=m=>{ const t=m.createdAt||m.start; return t?isoOf(new Date(t)).slice(0,7):null; };  // when it was booked
+const isDateless=m=>!!m&&!!m.dateUnknown;
+const isUpcoming=m=>!m.status&&!isDateless(m)&&new Date(m.end||m.start).getTime()>=Date.now();
+const needsStatus=m=>!m.status&&!isDateless(m)&&new Date(m.end||m.start).getTime()<Date.now();
+const needsDate=m=>!m.status&&isDateless(m);
+/* meeting \u2192 close: only real sales meetings held BEFORE the lead converted count.
+   Coffee / onboarding / check-ins are excluded, so the number measures selling,
+   not delivery. */
+const RATIO_EXCLUDE_DEFAULT=['Coffee','Onboarding','Check-in'];
+const closeStampOf=l=>String((l&&(l.convertedAt||l.closedAt))||'').slice(0,10)||null;
+const heldBeforeClose=(m,l)=>{ const c=closeStampOf(l); if(!c) return true; const d=String(m.start||'').slice(0,10); return !d||d<=c; };
+const ratioExcludeOf=settings=>Array.isArray(settings&&settings.ratioExcludeTypes)?settings.ratioExcludeTypes:RATIO_EXCLUDE_DEFAULT;
+const countsToRatio=(m,ex)=>!(ex||[]).includes(m.mtype||'Other');
+/* how far each lead ever got, plus the share of each stage that ultimately closed */
+const funnelOf=(leads,stages)=>{ const flow=(stages||[]).filter(s=>!s.lost); if(!flow.length) return [];
+  const reached=flow.map(()=>0);
+  (leads||[]).forEach(l=>{ let i=flow.findIndex(s=>s.key===l.stage);
+    (l.activities||[]).forEach(a=>{ if(a&&typeof a.text==='string'&&a.text.startsWith('Stage moved:')){
+      const to=a.text.split('\u2192').pop().trim(); const j=flow.findIndex(s=>s.label===to); if(j>i) i=j; } });
+    if(i<0) i=0; for(let k=0;k<=i;k++) reached[k]++; });
+  const closed=reached[reached.length-1]||0;
+  return flow.map((s,i)=>({key:s.key,label:s.label,color:s.color,count:reached[i],
+    rate:i===0?1:(reached[i-1]?reached[i]/reached[i-1]:0),
+    closeRate:reached[i]?closed/reached[i]:0})); };
+const ACT_LABEL={Booked:'Meeting Booked'};
+const actLabel=t=>ACT_LABEL[t]||t;
+const actPlural=t=>t==='Booked'?'Booked':t+'s';
+const bookedCount=l=>(l.activities||[]).filter(a=>a.type==='Booked').length;
+const fmtCustom=(v,type)=>{if(v===undefined||v==='')return '—';if(type==='checkbox')return v?'✓':'—';return String(v);};
+const DEFAULT_LEAD_COLS=[
+  {key:'loanPurpose',visible:true},{key:'stage',visible:true},{key:'source',visible:true},
+  {key:'nextAction',visible:true},{key:'lastContacted',visible:true},{key:'followUp',visible:true},
+  {key:'priority',visible:true},{key:'dealValue',visible:true},{key:'owner',visible:true},
+  {key:'loanType',visible:false},{key:'propertyType',visible:false},{key:'nextSteps',visible:false},{key:'phone',visible:false},{key:'email',visible:false},
+];
+
+/* ===================== data + auth live in ./lib/supabase ===================== */
+
+/* ===================== helpers ===================== */
+/* Real RFC-4122 UUID: the `leads.id` column is Postgres type `uuid`, so every
+   id we generate for a new lead MUST be a valid UUID or the insert is rejected
+   ("invalid input syntax for type uuid"). crypto.randomUUID is available in all
+   modern browsers over https; the fallback covers the rare case it isn't. */
+const uid=()=>{ try{ const c=globalThis.crypto||window.crypto; if(c&&c.randomUUID) return c.randomUUID(); const a=new Uint8Array(16); c.getRandomValues(a); a[6]=(a[6]&0x0f)|0x40; a[8]=(a[8]&0x3f)|0x80; const h=[...a].map(b=>b.toString(16).padStart(2,'0')); return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`; }catch{ return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,ch=>{ const r=Math.floor(Math.random()*16); const v=ch==='x'?r:(r&0x3|0x8); return v.toString(16); }); } };
+const cap=s=>s?s.charAt(0).toUpperCase()+s.slice(1):s;
+const num=v=>{const n=Number(v);return isNaN(n)?0:n;};
+const usd=v=>(num(v)<0?'-$':'$')+Math.abs(Math.round(num(v))).toLocaleString();
+const usdK=v=>{v=num(v);return Math.abs(v)>=1000?'$'+(v/1000).toFixed(v%1000===0?0:1)+'k':'$'+Math.round(v);};
+const pct=v=>(num(v)*100).toFixed(0)+'%';
+const isoOf=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const todayISO=()=>isoOf(new Date());
+const fmtDate=iso=>{if(!iso)return '';const d=new Date(iso+(iso.length<=10?'T00:00:00':''));return d.toLocaleDateString('en-US',{month:'short',day:'numeric'});};
+const fmtStamp=ts=>{const d=new Date(ts);return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' · '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});};
+const daysUntil=iso=>{if(!iso)return null;const a=new Date(iso+'T00:00:00'),b=new Date(todayISO()+'T00:00:00');return Math.round((a-b)/86400000);};
+const lastContact=l=>{const ts=(l.activities||[]).map(a=>a.ts).sort().pop();return ts||l.createdAt;};
+const daysSince=ts=>Math.floor((Date.now()-new Date(ts))/86400000);
+const monthKey=d=>{d=new Date(d);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;};
+const monthLabel=k=>{const[y,m]=k.split('-');return new Date(+y,+m-1,1).toLocaleString('en-US',{month:'short'});};
+const lastNMonths=n=>{const out=[];const d=new Date();d.setDate(1);for(let i=n-1;i>=0;i--){const x=new Date(d);x.setMonth(d.getMonth()-i);out.push(monthKey(x));}return out;};
+const sOf=(k,stages)=>stages.find(s=>s.key===k)||stages[0];
+const sIdx=(k,stages)=>{const i=stages.findIndex(s=>s.key===k);return i<0?0:i;};
+function leadColumnDefs(stages,customFields){
+  const d={
+    loanPurpose:{label:'Purpose',render:l=><span className="subcell">{l.loanPurpose||'—'}</span>},
+    loanType:{label:'Loan Type',render:l=><span className="subcell">{l.loanType||'—'}</span>},
+    propertyType:{label:'Property',render:l=><span className="subcell">{l.propertyType||'—'}</span>},
+    company:{label:'Co-borrower',render:l=><span className="subcell">{l.company||'—'}</span>},
+    stage:{label:'Stage',render:l=><StageBadge k={l.stage} stages={stages}/>},
+    source:{label:'Source',render:l=><span className="subcell">{l.source||'—'}</span>},
+    nextAction:{label:'Next Action',render:l=><span className="subcell">{l.nextAction}</span>},
+    nextSteps:{label:'Next Steps',render:l=><span className="subcell">{l.nextSteps||'—'}</span>},
+    lastContacted:{label:'Last Contact',render:l=>{const ds=daysSince(lastContact(l));return <span className="subcell" style={ds>=14?{color:RED,fontWeight:600}:undefined}>{ds===0?'Today':ds+'d ago'}</span>;}},
+    followUp:{label:'Follow-up',render:l=><Due iso={l.followUp}/>},
+    priority:{label:'Priority',render:l=><PriBadge p={l.priority}/>},
+    dealValue:{label:'Loan Amt',render:l=><span style={{fontWeight:600,color:INK}}>{l.dealValue>0?usd(l.dealValue):'—'}</span>},
+    owner:{label:'Loan Officer',render:l=><span className="subcell">{l.owner}</span>},
+    phone:{label:'Phone',render:l=><span className="subcell">{l.phone||'—'}</span>},
+    email:{label:'Email',render:l=><span className="subcell">{l.email||'—'}</span>},
+  };
+  (customFields||[]).forEach(f=>{d['cf:'+f.id]={label:f.label,render:l=><span className="subcell">{fmtCustom(l.custom?.[f.id],f.type)}</span>};});
+  return d;
+}
+function mergeLeadCols(saved,customFields){
+  const base=Array.isArray(saved)&&saved.length?saved.slice():DEFAULT_LEAD_COLS.slice();
+  const valid=new Set(DEFAULT_LEAD_COLS.map(c=>c.key).concat((customFields||[]).map(f=>'cf:'+f.id)));
+  let cols=base.filter(c=>valid.has(c.key));
+  DEFAULT_LEAD_COLS.forEach(dd=>{if(!cols.find(c=>c.key===dd.key))cols.push({...dd});});
+  (customFields||[]).forEach(f=>{const k='cf:'+f.id;if(!cols.find(c=>c.key===k))cols.push({key:k,visible:false});});
+  return cols;
+}
+
+/* ===================== delivery (post-sale fulfillment) ===================== */
+const DEFAULT_DELIVERY_TRACKS=[
+  { key:'website', label:'Website', services:['Web Design','Website','Both','Full Front Office'],
+    milestones:['Discovery call complete','Website dev pending','Website V1 sent','Revisions','Final proof sent','Website approved by client'] },
+  { key:'ai', label:'AI / Integrations', services:['AI Integration','AI Receptionist','Missed-Call Text-Back','Booking / Scheduling','CRM Setup','Both','Full Front Office'],
+    milestones:['Discovery & scoping','Integrations started','Build & configuration','Testing','Integrations delivered'] },
+];
+const activeTracks=(lead,tracks)=>{ const svc=lead.serviceInterest||[]; const m=(tracks||[]).filter(tr=>(tr.services||[]).some(s=>svc.includes(s))); return m.length?m:(tracks||[]); };
+
+/* ---- introduction network: who introduced whom ---- */
+/* returns [root, ..., directIntroducer] for a contact — cycle-safe */
+function introChain(lead,all){
+  if(!lead) return [];
+  const byId={}; (all||[]).forEach(x=>byId[x.id]=x);
+  const chain=[]; const seen=new Set([lead.id]); let cur=lead;
+  while(cur&&cur.introducedBy){
+    const p=byId[cur.introducedBy];
+    if(!p||seen.has(p.id))break;
+    seen.add(p.id); chain.unshift(p); cur=p;
+  }
+  return chain;
+}
+/* builds the intro forest + a tidy left-to-right layout */
+function buildNetwork(contacts){
+  const byId={}; contacts.forEach(c=>byId[c.id]=c);
+  const parentOf=id=>{const c=byId[id];const p=c&&c.introducedBy;return (p&&p!==id&&byId[p])?p:null;};
+  const kids={}; contacts.forEach(c=>{const p=parentOf(c.id); if(p)(kids[p]=kids[p]||[]).push(c.id);});
+  Object.values(kids).forEach(a=>a.sort((x,y)=>(byId[x].name||'').localeCompare(byId[y].name||'')));
+  const inNet=new Set();
+  contacts.forEach(c=>{ if(parentOf(c.id)||(kids[c.id]||[]).length) inNet.add(c.id); });
+  const roots=[...inNet].filter(id=>!parentOf(id)).sort((a,b)=>{
+    const ca=(kids[a]||[]).length, cb=(kids[b]||[]).length;
+    return cb-ca||(byId[a].name||'').localeCompare(byId[b].name||'');
+  });
+  const nodes=[],links=[]; let leaf=0; const seen=new Set();
+  const place=(id,depth)=>{
+    if(seen.has(id))return null;
+    seen.add(id);
+    const ch=(kids[id]||[]).filter(k=>!seen.has(k));
+    let y;
+    if(!ch.length){ y=leaf; leaf+=1; }
+    else{ const ys=ch.map(k=>place(k,depth+1)).filter(v=>v!=null); y=ys.length?(ys[0]+ys[ys.length-1])/2:(leaf++); ch.forEach(k=>links.push([id,k])); }
+    nodes.push({id,depth,y,kids:(kids[id]||[]).length});
+    return y;
+  };
+  roots.forEach(r=>place(r,1));
+  const depth=nodes.length?Math.max(...nodes.map(n=>n.depth)):0;
+  return {byId,kids,roots,nodes,links,inNet,rows:leaf,maxDepth:depth};
+}
+const normEntry=v=>{ if(!v) return {done:null,due:null}; if(typeof v==='string') return {done:v,due:null}; return {done:v.done||null,due:v.due||null}; };
+const trackProgress=(lead,track)=>{ const raw=(lead.delivery&&lead.delivery[track.key])||{}; const ms=track.milestones||[]; const entries={}; let completed=0,overdue=0,nextDue=null;
+  ms.forEach(m=>{ const e=normEntry(raw[m]); entries[m]=e; if(e.done) completed++; else if(e.due){ if(daysUntil(e.due)<0) overdue++; if(!nextDue||e.due<nextDue) nextDue=e.due; } });
+  const current=ms.find(m=>!entries[m].done)||null;
+  return {entries,ms,completedCount:completed,total:ms.length,pct:ms.length?completed/ms.length:0,current,overdue,nextDue}; };
+const clientOverall=(lead,tracks)=>{ const ts=activeTracks(lead,tracks); let c=0,t=0,phase='',overdue=0,nextDue=null,lastDone=null; ts.forEach(tr=>{const p=trackProgress(lead,tr);c+=p.completedCount;t+=p.total;overdue+=p.overdue; if(p.nextDue&&(!nextDue||p.nextDue<nextDue))nextDue=p.nextDue; if(p.current&&!phase)phase=`${tr.label}: ${p.current}`; Object.values(p.entries).forEach(e=>{ if(e.done&&(!lastDone||e.done>lastDone)) lastDone=e.done; }); }); const delivered=t>0&&c>=t; return {pct:t?c/t:0,phase:phase||'Delivered',tracks:ts,overdue,nextDue,completed:c,total:t,delivered,doneDate:lastDone}; };
+
+/* ===================== invoicing ===================== */
+const DEFAULT_INV_SECTIONS={ headerLeft:{fz:10,lh:1.55}, headerRight:{fz:10,lh:1.4}, billto:{fz:10,lh:1.45}, items:{fz:10.5,lh:1.5}, totals:{fz:10.5,lh:1.5}, pay:{fz:10,lh:1.45}, notes:{fz:9.5,lh:1.5} };
+const DEFAULT_INVOICING={ biz:{ name:BRAND.biz.name, address:BRAND.biz.address, email:BRAND.biz.email, phone:BRAND.biz.phone }, prefix:'INV-', seq:1, taxRate:0, terms:14, notes:'Thank you for your business.', paymentLink:'', accent:'#2B4DE0', logoH:46, showNotes:true, showPay:true, showLogo:true, layout:{order:['billto','items','totals','pay','notes'],headerSwap:false}, sections:DEFAULT_INV_SECTIONS };
+const invSubtotal=inv=>(inv.items||[]).reduce((a,it)=>a+num(it.qty)*num(it.amount),0);
+const invTax=inv=>invSubtotal(inv)*num(inv.taxRate)/100;
+const invTotal=inv=>invSubtotal(inv)+invTax(inv);
+const invState=inv=>{ if(inv.status==='paid') return 'paid'; if(inv.dueDate&&daysUntil(inv.dueDate)<0) return 'overdue'; return inv.status||'draft'; };
+const addDays=(iso,n)=>{ const d=new Date((iso||todayISO())+'T00:00:00'); d.setDate(d.getDate()+num(n)); return isoOf(d); };
+function itemsFromLead(l){ const items=[]; const d=(l&&l.deal&&typeof l.deal==='object')?l.deal:null;
+  if(d){ if(num(d.setup)) items.push({id:uid(),label:'Setup',qty:1,amount:num(d.setup)}); if(num(d.website)) items.push({id:uid(),label:'Website',qty:1,amount:num(d.website)}); if(num(d.integration)) items.push({id:uid(),label:'AI / Integration',qty:1,amount:num(d.integration)}); (d.extras||[]).forEach(e=>{ if(num(e.amount)) items.push({id:uid(),label:e.label||'Line item',qty:1,amount:num(e.amount)}); }); }
+  else if(l&&num(l.dealValue)){ items.push({id:uid(),label:'Project',qty:1,amount:num(l.dealValue)}); }
+  if(l&&l.retainerActive&&num(l.retainer)) items.push({id:uid(),label:'Monthly retainer',qty:1,amount:num(l.retainer)});
+  if(!items.length) items.push({id:uid(),label:'',qty:1,amount:0});
+  return items; }
+
+/* ===================== seed (your real board) ===================== */
+function mkLead(o){
+  const createdAt=o.createdAt||new Date(Date.now()-((o._ago||0)*36e5)).toISOString();
+  const acts=[{id:uid(),ts:createdAt,type:'Note',text:'Lead created.'}];
+  if(o.note) acts.unshift({id:uid(),ts:createdAt,type:'Note',text:o.note});
+  const {note,_ago,...rest}=o;
+  return {id:uid(),name:'',company:'',businessType:'—',phone:'',email:'',website:'',
+    stage:'new',priority:'medium',source:'',nextAction:'Follow Up Call',nextSteps:'',
+    followUp:'',expectedClose:'',serviceInterest:[],owner:BRAND.team[0]||'',dealValue:0,retainer:0,
+    potentialSponsor:false,pastSponsor:false,sponsorTier:'',sponsorAmount:0,
+    isRelationship:false,introducedBy:'',relNote:'',relTier:'',
+    retainerActive:false,retainerStart:'',closedAt:'',custom:{},createdAt,activities:acts,...rest};
+}
+/* Demo seed. A fresh client install starts EMPTY on purpose — never ship real
+   pipeline data into someone else's CRM. Set VITE_SEED_DEMO=true on a demo
+   deploy to populate these obviously-fake sample leads instead. */
+const DEMO_SEED=(import.meta.env.VITE_SEED_DEMO||'').toString().toLowerCase()==='true';
+function seed(){
+  if(!DEMO_SEED) return [];
+  const A=BRAND.team[0]||'Owner', B=BRAND.team[1]||A;
+  return [
+  mkLead({_ago:8,name:'Sample Client',company:'Northside Realty',businessType:'Real Estate',stage:'contacted',priority:'high',source:'Referral',owner:A,nextAction:'Follow up',dealValue:1200}),
+  mkLead({_ago:6,name:'Demo Prospect',company:'Meridian Lending',businessType:'Lending',stage:'meeting',priority:'medium',source:'Networking',owner:B,nextAction:'Send proposal',dealValue:1499}),
+  mkLead({_ago:4,name:'Example Lead',company:'Bright Path Insurance',businessType:'Professional Services',stage:'new',priority:'low',source:'Website',owner:BRAND.pool,nextAction:'Intro call'}),
+  mkLead({_ago:2,name:'Test Contact',company:'Harbor Group',businessType:'Real Estate',stage:'proposal',priority:'high',source:'Referral',owner:A,nextAction:'Close',dealValue:2400}),
+];}
+
+/* ===================== CSS ===================== */
+const CSS=`
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+*{box-sizing:border-box}
+.pt{font-family:'Inter',system-ui,sans-serif;color:#221f3d;display:flex;min-height:100vh;background:#F4F6FB}
+.pt h1,.pt h2,.pt h3,.pt h4,.disp{font-family:'Space Grotesk',sans-serif;letter-spacing:-.01em}
+.gate{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#211d44,${INK})}
+.gate-card{background:#fff;border-radius:20px;padding:38px 34px;width:340px;box-shadow:0 30px 80px -30px rgba(0,0,0,.6);text-align:center}
+.gate-card h2{font-size:20px;color:${INK};margin:14px 0 4px}.gate-card p{font-size:13px;color:#8E89A8;margin-bottom:20px}
+.gate-card input{width:100%;padding:12px 14px;border:1px solid #DEDFEA;border-radius:10px;font-size:15px;text-align:center;letter-spacing:.04em;margin-bottom:12px}
+.gate-card input:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.gate-err{color:${RED};font-size:12.5px;font-weight:600;margin-bottom:10px}
+.sb{width:236px;flex:none;background:linear-gradient(180deg,#211d44,${INK});color:#fff;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:20px 14px;z-index:30}
+.sb-brand{display:flex;flex-direction:column;align-items:flex-start;gap:9px;padding:6px 8px 18px;border-bottom:1px solid rgba(255,255,255,.09);margin-bottom:14px}
+.sb-suite{font-size:10.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#C9A227}
+.sb-brandrow{display:flex;align-items:center;gap:11px}
+.sb-brand img,.sb-logo{max-height:34px;max-width:170px;object-fit:contain}
+.nucleus{width:14px;height:14px;border-radius:50%;background:${COBALT};box-shadow:0 0 0 4px rgba(43,77,224,.25),0 0 14px 2px rgba(92,118,238,.6);flex:none}
+.sb-brand b{font-family:'Space Grotesk';font-size:16px;font-weight:600}
+.sb-brand span{display:block;font-size:11px;color:#A9A4CC;font-weight:400;letter-spacing:.04em}
+.nav-i{display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:10px;color:#C7C3E6;font-size:14px;font-weight:500;cursor:pointer;transition:.16s;border:none;background:none;width:100%;text-align:left;margin-bottom:2px}
+.nav-i:hover{background:rgba(255,255,255,.06);color:#fff}.nav-i.on{background:${COBALT};color:#fff;box-shadow:0 6px 18px -8px rgba(43,77,224,.9)}
+.nav-i svg{flex:none}
+.sb-foot{margin-top:auto;font-size:11px;color:#888;padding:12px 8px 2px;border-top:1px solid rgba(255,255,255,.08);line-height:1.5}.sb-foot b{color:#B9B5D8;font-weight:600}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:18px 30px;background:#fff;border-bottom:1px solid #E8E9F2;position:sticky;top:0;z-index:20}
+.top h1{font-size:21px;font-weight:600}.top .sub{font-size:13px;color:#777296;margin-top:2px}
+.body{padding:26px 30px 60px;width:100%;max-width:1320px}
+.hamb{display:none;background:none;border:none;color:${INDIGO};cursor:pointer}
+.kgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:16px;margin-bottom:22px}
+.ps-card{background:#fff;border:1px solid #E8E9F2;border-radius:16px;padding:18px 20px 14px;box-shadow:0 12px 30px -26px rgba(24,21,48,.5);margin-bottom:22px}
+.ps-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:2px}
+.ps-head h3{font-size:16px;font-weight:700;margin:0;color:#1f2430}
+.ps-head span{font-size:11.5px;color:#8b90a0}
+.ps-per{border:1px solid #E8E9F2;border-radius:8px;padding:5px 10px;font-size:11.5px;font-weight:600;color:#5b6472;background:#fbfbfd}
+.ps-grp{margin-top:12px}
+.ps-grp-h{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
+.ps-grp-h b{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#1e1b4b}
+.ps-grp-h span{font-size:11px;color:#8b90a0}
+.ps-row{display:grid;grid-template-columns:180px 40px 82px 1fr;align-items:center;gap:10px;padding:4px 0;border-bottom:1px solid #f3f4f7}
+.ps-row:last-child{border-bottom:none}
+.ps-name{display:flex;align-items:center;gap:8px;font-size:13px;color:#374151}
+.ps-dot{width:8px;height:8px;border-radius:2px;transform:rotate(45deg);flex:none}
+.ps-cnt{font-size:13px;font-weight:600;text-align:right;color:#111827}
+.ps-val{font-size:12.5px;color:#4b5563;text-align:right}
+.ps-barwrap{height:14px}
+.ps-bar{height:14px;border-radius:3px;min-width:2px}
+.ps-tie{margin-top:12px;border-top:1px dashed #d8dbe4;padding-top:10px;display:flex;gap:24px}
+.ps-tie span{font-size:12px;color:#8b90a0}
+.ps-tie b{color:#1f2430;font-weight:700;margin-left:5px}
+.dh-help{background:#fff;border:1px solid #E8E9F2;border-radius:14px;margin-bottom:18px;overflow:hidden}
+.dh-bar{display:flex;align-items:center;gap:9px;padding:12px 16px;cursor:pointer;color:#4b4870;font-size:13.5px;font-weight:600}
+.dh-bar svg:first-child{color:#7C5CFF}
+.dh-body{padding:0 16px 14px}
+.dh-in{display:flex;gap:8px}
+.dh-in input{flex:1;border:1px solid #E1E2EC;border-radius:9px;padding:9px 12px;font-size:13px}
+.dh-ans{margin-top:10px;background:#F6F5FF;border:1px solid #E7E4FA;border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.55;color:#3d3a55}
+.ai-note{background:#FFF7EC;border:1px solid #F1E2C6;border-radius:10px;padding:10px 13px;font-size:12.5px;color:#7a5b1e;margin-bottom:14px}
+.ai-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-bottom:18px}
+.ai-card{background:#fff;border:1px solid #E8E9F2;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:8px;box-shadow:0 12px 30px -26px rgba(24,21,48,.5)}
+.ai-ct{font-size:14px;font-weight:700;color:#1f2430}
+.ai-cd{font-size:12px;color:#7b7f92;line-height:1.5;flex:1}
+.ai-card .btn{align-self:flex-start}
+.ai-err{background:#FDEEED;border:1px solid #F3C9C6;border-radius:10px;padding:10px 13px;font-size:12.5px;color:#9b322e;margin-bottom:14px}
+.ai-res{background:#fff;border:1px solid #E8E9F2;border-radius:14px;padding:16px;margin-bottom:16px}
+.ai-rt{font-size:12.5px;font-weight:700;color:#1e1b4b;margin-bottom:10px}
+.ai-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #f3f4f7;font-size:13px}
+.ai-row span{color:#7b7f92}
+.ai-draft{border:1px solid #ECEDF4;border-radius:11px;padding:12px 14px;margin-bottom:10px}
+.ai-dh{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.ai-dsub{font-size:12.5px;font-weight:600;color:#4b4870;margin-bottom:6px}
+.ai-dbody{font-size:12.5px;color:#42465a;line-height:1.6;white-space:pre-wrap}
+.kpi{background:#fff;border:1px solid #E8E9F2;border-radius:16px;padding:18px;box-shadow:0 12px 30px -26px rgba(24,21,48,.5)}
+.kpi .kl{font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8E89A8;display:flex;align-items:center;gap:7px}
+.kpi .kv{font-family:'Space Grotesk';font-size:26px;font-weight:600;margin-top:9px;color:${INK};line-height:1}
+.kpi .kd{font-size:12.5px;font-weight:600;margin-top:8px;color:#8E89A8}
+.kpi.accent{background:linear-gradient(135deg,${COBALT},#2540c0);border:none}.kpi.accent .kl,.kpi.accent .kd{color:#D5DCFB}.kpi.accent .kv{color:#fff}
+.kpi.gold{background:linear-gradient(135deg,${GOLD},#B0862F);border:none}.kpi.gold .kl,.kpi.gold .kd{color:#fff5e0}.kpi.gold .kv{color:#fff}
+.kpi.green{background:linear-gradient(135deg,${GREEN},#178047);border:none}.kpi.green .kl,.kpi.green .kd{color:#dafce8}.kpi.green .kv{color:#fff}
+.row{display:grid;gap:18px;margin-bottom:18px}.r2{grid-template-columns:1fr 1fr}.r3{grid-template-columns:2fr 1fr}
+@media(max-width:900px){.r2,.r3{grid-template-columns:1fr}}
+.card{background:#fff;border:1px solid #E8E9F2;border-radius:16px;padding:20px;box-shadow:0 12px 30px -28px rgba(24,21,48,.5)}
+.card h3{font-size:15px;font-weight:600;color:${INK};margin-bottom:3px}.card .ch-sub{font-size:12.5px;color:#8E89A8;margin-bottom:14px}
+.chart-h{height:250px}.chart-sm{height:210px}
+.sec-title{font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#928DAD;margin:6px 0 14px;display:flex;align-items:center;gap:8px}
+.empty{padding:26px;text-align:center;color:#A6A2BC;font-size:13.5px}
+.btn{font-family:'Inter';font-size:14px;font-weight:600;padding:10px 18px;border-radius:10px;border:none;cursor:pointer;transition:.16s;display:inline-flex;align-items:center;gap:8px}
+.btn-p{background:${COBALT};color:#fff;box-shadow:0 8px 20px -10px rgba(43,77,224,.8)}.btn-p:hover{background:#2340bd}
+.btn-g{background:#F0F1F7;color:#56527a}.btn-g:hover{background:#E6E7F1}
+.btn-d{background:#fff;color:${RED};border:1px solid #F0CACA}.btn-d:hover{background:#FCEDED}
+.btn-sm{padding:7px 12px;font-size:12.5px;border-radius:8px}
+.pill{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;flex:none}
+.tag{font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:6px;background:#EEF0FA;color:#5A5680;white-space:nowrap}
+/* table */
+.tbl-wrap{background:#fff;border:1px solid #E8E9F2;border-radius:16px;overflow:auto;box-shadow:0 12px 30px -28px rgba(24,21,48,.5)}
+.tbl{width:100%;border-collapse:collapse;font-size:13.5px}
+.colmenu-wrap{position:relative}
+.cm-back{position:fixed;inset:0;z-index:39}
+.colmenu{position:absolute;top:46px;right:0;z-index:40;background:#fff;border:1px solid #E8E9F2;border-radius:14px;box-shadow:0 20px 50px -20px rgba(24,21,48,.5);padding:8px;width:252px;max-height:380px;overflow-y:auto}
+.colmenu .cm-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px}
+.colmenu .cm-row:hover{background:#FAFAFD}
+.colmenu .cm-name{flex:1;font-size:13px;color:#3a3658}
+.colmenu .cm-lock{font-size:10.5px;color:#B6B2CC;text-transform:uppercase;letter-spacing:.04em}
+.colmenu input[type=checkbox]{width:15px;height:15px;accent-color:${COBALT};cursor:pointer}
+.tbl th{text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#9C98B4;font-weight:500;padding:13px 14px;border-bottom:1px solid #E8E9F2;background:#FBFBFE;cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:0}
+.tbl th .ar{opacity:.4;margin-left:4px}.tbl th.sorted{color:${COBALT}}.tbl th.sorted .ar{opacity:1}
+.tbl td{padding:13px 14px;border-bottom:1px solid #F0F0F6;color:#3a3658;white-space:nowrap}
+.tbl tbody tr{cursor:pointer}.tbl tbody tr:hover td{background:#FAFAFD}.tbl tr:last-child td{border-bottom:none}
+.namecell{font-weight:600;color:${INK}}.subcell{font-size:12px;color:#928DAD}
+.due{font-weight:600}.due.over{color:${RED}}.due.today{color:${GOLD}}.due.soon{color:${COBALT}}.due.far{color:#8E89A8}
+.toolbar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.searchbox{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #DEDFEA;border-radius:10px;padding:8px 12px;flex:1;min-width:200px}
+.searchbox input{border:none;outline:none;font-size:14px;width:100%;font-family:'Inter';color:${INK}}
+.selctl{padding:9px 12px;border:1px solid #DEDFEA;border-radius:10px;font-size:13.5px;font-family:'Inter';background:#fff;color:#56527a;cursor:pointer}
+/* kanban (cleaner) */
+.kanban{display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;align-items:stretch}
+.kcol{background:#fff;border:1px solid #E8E9F2;border-radius:16px;display:flex;flex-direction:column;min-height:140px;overflow:hidden;box-shadow:0 12px 30px -28px rgba(24,21,48,.5);flex:1 0 260px;min-width:260px}
+.kcol.drag{outline:2px dashed ${COBALT};outline-offset:-2px}
+.kbar{height:4px;width:100%}
+.kcol-h{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 4px}
+.kcol-h .kt{font-family:'Space Grotesk';font-weight:600;font-size:14px;color:${INK}}
+.kcol-h .kc{font-size:11px;font-weight:700;color:#928DAD;background:#F1F2F8;border-radius:20px;padding:2px 9px}
+.kcol-v{font-size:11.5px;color:#928DAD;padding:0 14px 10px;font-weight:600}
+.kcol-body{padding:6px 10px 12px;flex:1;overflow-y:auto}
+.kcard{background:#fff;border:1px solid #E8E9F2;border-radius:12px;padding:12px;margin-bottom:9px;cursor:pointer;box-shadow:0 4px 12px -10px rgba(24,21,48,.5);transition:.14s}
+.kcard:hover{box-shadow:0 14px 28px -16px rgba(24,21,48,.5);transform:translateY(-1px);border-color:#D9DBEC}
+.kcard .kn{font-weight:600;font-size:14px;color:${INK};display:flex;align-items:center;gap:6px}
+.kcard .kco{font-size:12px;color:#777296;margin:2px 0 9px}
+.kcard .ktags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:9px}
+.kcard .kmeta{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.kdrop{font-size:12px;color:#B6B2CC;text-align:center;padding:16px 0;border:1.5px dashed #E4E5F0;border-radius:10px;margin:2px 4px 8px}
+.kcol.drag{outline:2px dashed ${COBALT};outline-offset:-3px;box-shadow:0 0 0 4px rgba(43,77,224,.1),0 12px 30px -22px ${COBALT}}
+.kcard.dragging{opacity:.55;transform:rotate(2deg) scale(.98);box-shadow:0 18px 36px -14px rgba(24,21,48,.6)}
+.kcard.od{border-left:3px solid ${RED}}
+.kcard-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.kown{flex:none;width:22px;height:22px;border-radius:50%;background:${INDIGO};color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk'}
+.kvals{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.kdv{font-size:12.5px;font-weight:700;color:${INK}}
+.kmrr{font-size:10.5px;font-weight:700;color:${GREEN};background:rgba(31,157,85,.1);padding:2px 7px;border-radius:20px}
+.kstale{display:inline-flex;align-items:center;gap:4px;margin-top:8px;font-size:10.5px;font-weight:700;color:#A9732B;background:rgba(200,135,40,.12);padding:3px 8px;border-radius:20px}
+.kmove{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:10px;padding-top:9px;border-top:1px solid #F1F1F7}
+.kmv{flex:none;width:30px;height:28px;border-radius:8px;border:1px solid #E4E5F0;background:#fff;color:${COBALT};display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.13s}
+.kmv:hover:not(:disabled){background:${COBALT};color:#fff;border-color:${COBALT}}
+.kmv:disabled{color:#D2D2DE;cursor:default}
+.kmv-s{flex:1;text-align:center;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#A6A2BC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kwtd{color:#B6B2CC;font-weight:600}
+.kcoll-x{border:none;background:#F1F2F8;color:#928DAD;width:22px;height:22px;border-radius:7px;cursor:pointer;display:flex;align-items:center;justify-content:center}.kcoll-x:hover{background:#E4E5F0}
+.kcollapsed{flex:0 0 58px;min-width:58px;max-width:58px;cursor:pointer;align-items:stretch}
+.kcollapsed:hover{border-color:#D9DBEC;box-shadow:0 12px 30px -20px rgba(24,21,48,.5)}
+.kcoll-body{flex:1;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px 0}
+.kcoll-exp{color:#B6B2CC}
+.kcoll-label{writing-mode:vertical-rl;transform:rotate(180deg);font-family:'Space Grotesk';font-weight:600;font-size:13px;color:${INK};letter-spacing:.02em}
+/* modal */
+.scrim2{position:fixed;inset:0;background:rgba(24,21,48,.5);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px}
+.modal{width:960px;max-width:96vw;max-height:90vh;background:#F4F6FB;border-radius:22px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 40px 100px -30px rgba(0,0,0,.6);animation:pop .18s ease}
+@keyframes pop{from{transform:scale(.97);opacity:.5}to{transform:none;opacity:1}}
+.m-head{background:#fff;border-bottom:1px solid #E8E9F2;padding:18px 24px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.m-head h2{font-size:21px;color:${INK}}.m-head .co{font-size:16px;font-weight:500;color:#5A5680;margin-top:4px}
+.m-head .meta{font-size:11.5px;color:#A6A2BC;margin-top:6px}
+.m-head .qa{display:flex;gap:8px;margin-top:11px;flex-wrap:wrap}
+.qbtn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:${COBALT};background:rgba(43,77,224,.08);border:none;border-radius:8px;padding:6px 10px;cursor:pointer;text-decoration:none}
+.qbtn:hover{background:rgba(43,77,224,.15)}
+.m-x{background:#F0F1F7;border:none;border-radius:9px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#56527a;flex:none}.m-x:hover{background:#E6E7F1}.m-x:disabled{opacity:.35;cursor:default}
+.m-grid{display:grid;grid-template-columns:1.15fr .85fr;overflow:hidden;flex:1;min-height:0}
+.m-left{padding:20px 22px;overflow-y:auto}.m-right{padding:20px 22px;overflow-y:auto;background:#fff;border-left:1px solid #E8E9F2;display:flex;flex-direction:column}
+@media(max-width:760px){.m-grid{grid-template-columns:1fr;overflow-y:auto}.m-left,.m-right{overflow:visible}.m-right{border-left:none;border-top:1px solid #E8E9F2}}
+.dh{font-size:11.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:${COBALT};margin:2px 0 12px;display:flex;align-items:center;gap:8px}.dh.mt{margin-top:22px}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.field label{display:block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#928DAD;margin-bottom:5px}
+.field input,.field select,.field textarea{width:100%;padding:9px 11px;border:1px solid #DEDFEA;border-radius:9px;font-size:13.5px;font-family:'Inter';color:${INK};background:#fff}
+.field textarea{resize:vertical}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.field input:focus,.field select:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.field.full{grid-column:1/-1}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{font-size:12px;font-weight:600;padding:7px 11px;border-radius:20px;border:1px solid #DEDFEA;background:#fff;color:#56527a;cursor:pointer;transition:.14s;display:inline-flex;align-items:center;gap:6px}
+.chip.on{border-color:${COBALT};background:rgba(43,77,224,.1);color:${COBALT}}
+.chip.add{border-style:dashed;color:#928DAD}
+.toggle{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13.5px;color:${INK};font-weight:500;margin-top:11px}
+.extras{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.extra-row{display:flex;align-items:center;gap:8px}
+.extra-row .ex-label{flex:1;padding:9px 11px;border:1px solid #DEDFEA;border-radius:9px;font-size:13px;font-family:'Inter';color:${INK};background:#fff}
+.extra-row .ex-label:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.ex-amt-w{display:flex;align-items:center;gap:4px;border:1px solid #DEDFEA;border-radius:9px;padding:0 10px;background:#fff;width:120px}
+.ex-amt-w span{color:#928DAD;font-size:13px}
+.ex-amt-w:focus-within{border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.ex-amt{border:none;outline:none;width:100%;padding:9px 0;font-size:13.5px;font-family:'Inter';color:${INK};background:transparent}
+.ex-del{border:none;background:#F2F2F8;color:#928DAD;width:34px;height:34px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none}
+.ex-del:hover{background:rgba(209,67,67,.1);color:${RED}}
+.addline{margin-top:10px;background:none;border:1px dashed #CFD0E0;color:${COBALT};font-weight:600;font-size:12.5px;padding:8px 12px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.addline:hover{background:rgba(43,77,224,.05);border-color:${COBALT}}
+.deal-total{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:11px 13px;background:#F6F7FB;border-radius:10px}
+.deal-total span{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#928DAD}
+.deal-total b{font-family:'Space Grotesk';font-size:17px;color:${INK}}
+.sw{width:42px;height:24px;border-radius:14px;background:#D9DAE6;position:relative;transition:.18s;flex:none}.sw.on{background:${GREEN}}
+.sw b{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.18s;box-shadow:0 1px 3px rgba(0,0,0,.2)}.sw.on b{left:21px}
+.sw.sm{width:34px;height:20px}.sw.sm b{width:14px;height:14px}.sw.sm.on b{left:17px}
+/* activity */
+.afilter{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.afilter button{font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:8px;border:1px solid #E4E5F0;background:#fff;color:#8E89A8;cursor:pointer}
+.afilter button.on{border-color:${COBALT};background:rgba(43,77,224,.08);color:${COBALT}}
+.spon-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
+.spon-tog{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid #E1E2EC;border-radius:10px;font-size:13px;font-weight:600;color:#56527a;cursor:pointer;background:#fff}
+.spon-tog input{accent-color:${COBALT};width:15px;height:15px;cursor:pointer}
+.spon-tog.on{border-color:${COBALT};background:rgba(43,77,224,.08);color:${COBALT}}
+.spon-tog.past input{accent-color:${GOLD}}
+.spon-tog.past.on{border-color:${GOLD};background:rgba(200,162,74,.12);color:#8a6a1f}
+.spon-badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:rgba(43,77,224,.1);color:${COBALT}}
+.spon-badge.past{background:rgba(200,162,74,.16);color:#8a6a1f}
+.spon-tog.rel input{accent-color:#7A5CC8}
+.spon-tog.rel.on{border-color:#7A5CC8;background:rgba(122,92,200,.1);color:#5b3fa6}
+.rel-hint{font-size:11.5px;color:#8b88a0;margin-top:7px;line-height:1.45}
+.rel-tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
+.rel-tier{display:flex;flex-direction:column;min-height:280px;background:#fff;border:1.5px solid #EAEBF2;border-radius:14px;overflow:hidden;position:relative;transition:.14s}
+.rel-tier::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--tc);z-index:1}
+.rel-tier:hover{border-color:var(--tc)}
+.rel-tier.on{border-color:var(--tc);box-shadow:0 10px 26px -16px var(--tc)}
+.rt-head{padding:15px 16px 12px;cursor:pointer;border-bottom:1px solid #F1F1F7}
+.rel-tier.on .rt-head{background:color-mix(in srgb,var(--tc) 8%,#fff)}
+.rt-top{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:800;color:${INK}}
+.rt-dot{width:9px;height:9px;border-radius:50%;background:var(--tc);flex:none}
+.rt-count{margin-left:auto;font-size:13px;font-weight:800;color:#fff;background:var(--tc);min-width:24px;text-align:center;padding:2px 8px;border-radius:20px}
+.rt-d{font-size:11.5px;color:#8b88a0;font-weight:500;margin-top:5px}
+.rt-people{flex:1;overflow-y:auto;padding:6px}
+.rt-person{display:flex;align-items:baseline;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer}
+.rt-person:hover{background:color-mix(in srgb,var(--tc) 8%,#fff)}
+.rt-pn{font-size:13px;font-weight:600;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt-pc{font-size:11px;color:#928DAD;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.rt-empty{padding:24px 12px;text-align:center;font-size:12px;color:#b7b4c6}
+.rt-foot{padding:9px 14px;font-size:11px;font-weight:700;color:var(--tc);text-align:center;border-top:1px solid #F1F1F7;cursor:pointer;background:#FCFCFE}
+.rt-foot:hover{background:color-mix(in srgb,var(--tc) 6%,#fff)}
+.rel-netline{display:flex;align-items:center;gap:8px;font-size:12px;color:#8b88a0;font-weight:600;margin-bottom:16px;flex-wrap:wrap}
+.rel-clearf{margin-left:auto;border:1px solid #E1E2EC;background:#fff;border-radius:20px;padding:4px 11px;font-size:11.5px;font-weight:700;color:${COBALT};cursor:pointer}
+.rel-clearf:hover{background:rgba(43,77,224,.06)}
+.tier-pick{display:inline-flex;align-items:center;gap:5px}
+.tier-dot{width:8px;height:8px;border-radius:50%;background:var(--tc);flex:none}
+.tier-pick select{border:1px solid #E7E8F0;border-radius:20px;padding:3px 8px;font-size:11.5px;font-weight:700;color:var(--tc);background:#fff;cursor:pointer}
+.tier-btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.tier-btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid #E1E2EC;background:#fff;border-radius:20px;padding:6px 13px;font-size:12.5px;font-weight:700;color:#56527a;cursor:pointer}
+.tier-btn.on{border-color:var(--tc);color:var(--tc);background:color-mix(in srgb,var(--tc) 8%,#fff)}
+@media(max-width:640px){.rel-tiers{grid-template-columns:1fr}}
+.rel-from{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:7px 11px;border-radius:9px;background:rgba(122,92,200,.08);border:1px solid rgba(122,92,200,.22);color:#5b3fa6;font-size:12.5px;cursor:pointer}
+.rel-from:hover{background:rgba(122,92,200,.15)}
+.rel-gave{display:flex;align-items:center;gap:7px;margin-top:10px;padding:8px 11px;border-radius:9px;background:#F4F5FA;border:1px solid #E5E6F0;color:#56527a;font-size:12.5px}
+.rel-chip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:20px;background:rgba(122,92,200,.1);color:#5b3fa6}
+.rel-ghead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.rel-gname{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:800;color:#5b3fa6;cursor:pointer}
+.rel-gname:hover{text-decoration:underline}
+.rel-gname.plain{color:#8b88a0;cursor:default}
+.rel-gname.plain:hover{text-decoration:none}
+.rel-gcount{font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:#EEF0F7;color:#56527a}
+/* collapsible modal sections */
+.msecs{margin-top:18px;border-top:1px solid #F0F0F6}
+.msec{border-bottom:1px solid #F0F0F6}
+.msec-h{display:flex;align-items:center;gap:9px;padding:13px 2px;cursor:pointer;user-select:none}
+.msec-h:hover .msec-t{color:${COBALT}}
+.msec-t{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:${INK};transition:.12s}
+.msec-s{margin-left:auto;font-size:12px;color:#9b98ad;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52%}
+.msec-ch{color:#c0bdd0;flex:none;transition:transform .16s;margin-left:auto}
+.msec-s+.msec-ch{margin-left:6px}
+.msec.open .msec-ch{transform:rotate(180deg);color:${COBALT}}
+.msec-b{padding:2px 2px 16px}
+/* quick add */
+.morebtn{display:flex;align-items:center;gap:7px;width:100%;margin-top:16px;padding:11px 12px;border:1px dashed #D6D8E6;border-radius:10px;background:#FAFAFE;color:#56527a;font-size:12.5px;font-weight:700;cursor:pointer}
+.morebtn:hover{border-color:${COBALT};color:${COBALT}}
+.morebtn i{margin-left:auto;font-style:normal;font-size:11.5px;color:#9b98ad;font-weight:500}
+.mb-ch{transition:transform .16s}.mb-ch.on{transform:rotate(180deg)}
+.dupe-warn{display:flex;align-items:center;gap:8px;margin-top:10px;padding:9px 12px;border-radius:9px;background:#FFF7ED;border:1px solid #FCD9B6;color:#9a5a16;font-size:12.5px}
+.dupe-warn b{cursor:pointer;text-decoration:underline}
+/* follow-up block in modal */
+.fu-block{background:#FAFAFE;border:1px solid #EDEEF5;border-radius:11px;padding:13px}
+.fu-note{width:100%;border:1px solid #E1E2EC;border-radius:9px;padding:9px 11px;font-size:13px;font-family:inherit;color:${INK};resize:vertical;line-height:1.5}
+.fu-note:focus{outline:none;border-color:${COBALT}}
+.fu-when{margin-top:10px;font-size:11.5px;font-weight:700;color:#1f8a55}
+.fu-when.od{color:#b4322e}
+.fn-block{background:#FAFAFE;border:1px solid #EDEEF5;border-radius:11px;padding:13px}
+.fn-hint{display:flex;align-items:center;gap:5px;margin-top:8px;font-size:11.5px;color:#9b98ad;font-weight:500}
+.chip-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#56527a;cursor:pointer}
+.chip-toggle input{accent-color:${COBALT};width:15px;height:15px;cursor:pointer}
+.phase-badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;padding:3px 11px;border-radius:20px;white-space:nowrap}
+.cli-list{display:flex;flex-direction:column;gap:10px}
+.cli-card{background:#fff;border:1px solid #EAEBF2;border-radius:13px;overflow:hidden}
+.cli-card.od{border-color:#F3C9C2}
+.cli-main{display:grid;grid-template-columns:1.4fr auto 1.5fr 1.6fr auto;gap:16px;align-items:center;padding:14px 16px;cursor:pointer}
+.cli-main:hover{background:#FCFCFE}
+.cli-id{min-width:0}
+.cli-name{font-weight:700;color:${INK};font-size:14.5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cli-name:hover{color:${COBALT};text-decoration:underline}
+.cli-prog2{min-width:0}
+.cli-prog2-top{display:flex;justify-content:space-between;font-size:11px;font-weight:700;color:#8b88a0;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
+.cli-status{display:flex;flex-direction:column;gap:5px;align-items:flex-start;min-width:0}
+.cli-next{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#56527a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.cli-next svg{flex:none;color:#C9C5D9}
+.cli-ch{color:#c0bdd0;transition:transform .16s;flex:none}
+.cli-ch.open{transform:rotate(180deg);color:${COBALT}}
+.cli-body{border-top:1px solid #EEF0F6;padding:14px 16px;background:#FAFBFE}
+.cli-actions{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.phase-sel{border:1px solid #E1E2EC;border-radius:8px;padding:6px 10px;font-size:12.5px;color:${INK};background:#fff;font-weight:600}
+.onb-group{margin-bottom:14px}
+.onb-gh{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.onb-gc{font-size:11px;font-weight:700;color:#8b88a0}
+.onb-item{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:8px}
+.onb-item:hover{background:#fff}
+.onb-item.over{background:rgba(209,67,67,.05)}
+.onb-check{cursor:pointer;flex:none;display:flex}
+.onb-label{flex:1;min-width:0;font-size:13px;color:${INK};cursor:pointer;line-height:1.4}
+.onb-item.done .onb-label{color:#9b98ad;text-decoration:line-through}
+.onb-date{font-size:11.5px;font-weight:600;color:#1f8a55;white-space:nowrap;flex:none}
+.onb-due{display:inline-flex;align-items:center;gap:6px;flex:none}
+.onb-due span{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#a6a2bc}
+.onb-due input{border:1px solid #E1E2EC;border-radius:7px;padding:3px 7px;font-size:11.5px;color:#56527a;background:#fff}
+.onb-due input.over{border-color:#E0967F;color:#b4322e}
+@media(max-width:820px){.cli-main{grid-template-columns:1fr auto;gap:9px}.cli-prog2,.cli-status{grid-column:1/-1}.cli-ch{position:absolute;right:16px;top:16px}}
+.seg i{font-style:normal;font-size:10px;font-weight:800;padding:1px 6px;border-radius:20px;background:#DFE2EE;color:#56527a;margin-left:6px}
+.seg button.on i{background:${COBALT};color:#fff}
+.cp-tag{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;background:rgba(122,92,200,.15);color:#7A5CC8;padding:1px 5px;border-radius:5px;margin-left:6px}
+.cli-hint{display:flex;align-items:center;gap:7px;justify-content:center;padding:20px;color:#a6a2bc;font-size:13px}
+.cli-detail{background:#fff;border:1px solid #EAEBF2;border-radius:13px;padding:16px;margin-top:14px}
+.cli-detail-h{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px}
+.cp-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.cp-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;border:1px solid;border-radius:20px;padding:3px 10px}
+.cp-chip button{background:none;border:none;cursor:pointer;color:inherit;display:flex;opacity:.6;padding:0}
+.cp-chip button:hover{opacity:1}
+.cp-add{display:flex;align-items:center;gap:7px;flex-wrap:wrap;background:#F7F8FC;border:1px solid #EDEEF5;border-radius:9px;padding:7px 9px}
+.cp-add input[type=text],.cp-add>input:not([type=color]){border:1px solid #E1E2EC;border-radius:7px;padding:5px 8px;font-size:12.5px}
+.cp-add input[type=color]{width:30px;height:30px;border:1px solid #E1E2EC;border-radius:7px;padding:2px;background:#fff;cursor:pointer}
+.cp-add label{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#56527a}
+.cp-add select{border:1px solid #E1E2EC;border-radius:7px;padding:5px 7px;font-size:12px}
+.phase-editor{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.phase-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #EDEEF5;border-radius:10px;background:#FAFAFE}
+.phase-row input[type=color]{width:30px;height:30px;border:1px solid #E1E2EC;border-radius:7px;padding:2px;background:#fff;cursor:pointer;flex:none}
+.phase-label{flex:1;border:1px solid #E1E2EC;border-radius:7px;padding:6px 9px;font-size:13px;font-weight:600;color:${INK}}
+.phase-key{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#a6a2bc;flex:none}
+.phase-moves{display:flex;gap:3px;flex:none}
+.m-foot{flex:none;background:#fff;border-top:1px solid #E8E9F2;padding:13px 22px;display:flex;align-items:center;gap:10px;box-shadow:0 -6px 20px -12px rgba(0,0,0,.18)}
+.m-foot-n{display:flex;align-items:center;gap:5px;margin-left:auto;font-size:12px;color:#8b88a0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+/* follow-up card: plan + next flow */
+.fu-plan{display:flex;gap:7px;align-items:flex-start;margin:9px 0 0;padding:8px 10px;background:#FFFDF5;border:1px solid #F0E4C0;border-radius:8px;font-size:12.5px;color:#6a5a2f;line-height:1.45}
+.fu-plan svg{flex:none;margin-top:1px;color:#B9932F}
+.fu-next{background:#F4F7FF;border:1px solid #D6E0FA;border-radius:10px;padding:11px}
+.fu-next-h{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:${INK};margin-bottom:8px}
+.fu-next-h b{color:${COBALT}}
+.fu-next-b{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.fu-next-note{font-size:11px;color:#9b98ad}
+.rel-chain{margin-top:12px;padding:11px 13px;border-radius:10px;background:#F7F8FC;border:1px solid #EDEEF5}
+.rc-lbl{font-size:10px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#9b98ad;margin-bottom:7px}
+.rc-path{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.rc-node{font-size:12.5px;font-weight:700;color:#5b3fa6;background:rgba(122,92,200,.1);padding:3px 9px;border-radius:20px;cursor:pointer}
+.rc-node:hover{background:rgba(122,92,200,.2)}
+.rc-node.root{background:rgba(200,162,74,.18);color:#8a6a1f}
+.rc-node.self{background:${INK};color:#fff;cursor:default}
+.rc-arrow{color:#c7c5d4;flex:none}
+.rc-root{margin-top:8px;font-size:12px;color:#8b88a0}
+.rc-root b{color:#8a6a1f;cursor:pointer}
+.rc-root b:hover{text-decoration:underline}
+.web-card{padding:14px}
+.web-actions{margin-left:auto;display:flex;gap:8px}
+.task-daypick{display:flex;align-items:center;gap:6px}
+.day-chip{border:1px solid #E1E2EC;background:#fff;border-radius:9px;padding:9px 12px;font-size:12.5px;font-weight:700;color:#56527a;cursor:pointer}
+.day-chip.on{border-color:${COBALT};background:color-mix(in srgb,${COBALT} 8%,#fff);color:${COBALT}}
+.day-date{display:inline-flex;align-items:center;gap:6px;border:1px solid #E1E2EC;border-radius:9px;padding:8px 11px;color:#56527a;cursor:pointer}
+.day-date input{border:none;background:none;font-size:12.5px;font-family:inherit;color:#56527a;cursor:pointer;width:120px}
+.day-date input:focus{outline:none}
+.task-due-chip{position:relative;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;cursor:pointer}
+.task-due-chip input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.gcal-on{display:flex;align-items:center;gap:11px;background:color-mix(in srgb,${GREEN} 7%,#fff);border:1px solid color-mix(in srgb,${GREEN} 25%,#fff);border-radius:11px;padding:13px 15px}
+.gcal-dot{width:10px;height:10px;border-radius:50%;background:${GREEN};flex:none;box-shadow:0 0 0 4px color-mix(in srgb,${GREEN} 18%,#fff)}
+.gcal-off{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.mtg-warn{display:flex;align-items:flex-start;gap:7px;background:#FFF7ED;border:1px solid #FCD9B6;color:#9a5a16;border-radius:9px;padding:9px 11px;font-size:12.5px;margin-bottom:12px;line-height:1.45}
+.mtg-warn svg{flex:none;margin-top:2px}
+.act-t.booked{border-color:#F0C09B;color:#C05A1E}
+.act-t.booked.on{background:#E0662B;border-color:#E0662B;color:#fff}
+/* header quick facts (the qualifying data, surfaced at the top) */
+.m-headright{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex:none;min-width:0}
+.m-facts{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end;max-width:430px}
+.mf{display:flex;flex-direction:column;align-items:flex-start;gap:1px;background:#F7F8FC;border:1px solid #EAEBF2;border-radius:9px;padding:5px 10px;cursor:pointer;text-align:left;min-width:72px;transition:.12s}
+.mf:hover{border-color:${COBALT};background:color-mix(in srgb,${COBALT} 6%,#fff)}
+.mf i{font-style:normal;font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#a6a2bc}
+.mf b{font-size:12.5px;font-weight:700;color:${INK};white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis}
+.mf.hot{border-color:#EFB98F;background:color-mix(in srgb,#E0662B 8%,#fff)}
+.mf.hot b{color:#C05A1E}
+/* jump bar — one tap to any section, no scrolling */
+.m-jump{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:10px 24px;background:#fff;border-bottom:1px solid #E8E9F2;flex:none}
+.mj-l{font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#a6a2bc;margin-right:2px}
+.mj{display:inline-flex;align-items:center;gap:6px;border:1px solid #E4E5EF;background:#fff;border-radius:20px;padding:6px 13px;font-size:12.5px;font-weight:700;color:#56527a;cursor:pointer;transition:.12s}
+.mj:hover{border-color:${COBALT};color:${COBALT}}
+.mj.on{background:color-mix(in srgb,${COBALT} 8%,#fff);border-color:${COBALT};color:${COBALT}}
+.mj i{font-style:normal;font-size:10px;font-weight:800;background:#EEF0F7;color:#56527a;border-radius:20px;padding:1px 6px}
+.mj.on i{background:${COBALT};color:#fff}
+@media(max-width:820px){
+  .m-head{flex-wrap:wrap}
+  .m-headright{max-width:100%}
+  .m-facts{max-width:100%;gap:6px}
+  .mf{min-width:0;padding:4px 8px}
+  .mf b{font-size:12px;max-width:92px}
+  .mf:nth-child(n+5){display:none}
+  .m-jump{padding:9px 16px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .mj{flex:none}
+  .mj-l{display:none}
+}
+.mtg-form{margin-top:6px}
+.mtg-toggles{display:flex;gap:8px;flex-wrap:wrap}
+.mtg-chk{display:inline-flex;align-items:center;gap:6px;border:1.5px solid #E1E2EC;border-radius:9px;padding:8px 11px;font-size:12.5px;font-weight:600;color:#56527a;cursor:pointer}
+.mtg-chk input{display:none}
+.mtg-chk.on{border-color:${COBALT};color:${COBALT};background:color-mix(in srgb,${COBALT} 7%,#fff)}
+.mtg-chk.off{opacity:.5;cursor:not-allowed}
+.mtg-err{color:#b4322e;font-size:12.5px;margin:8px 0}
+.mtg-list{margin-bottom:14px}
+.mtg-empty{font-size:12.5px;color:#9b98ad;padding:8px 0 14px}
+.mtg-band{font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#8b88a0;margin:10px 0 7px}
+.mtg-band.past{color:#b7b4c6}
+.mtg-row{display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid #EDEEF5;border-radius:10px;margin-bottom:7px;background:#FBFBFE}
+.mtg-when{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:${INK};white-space:nowrap;flex:none}
+.mtg-when svg{color:${COBALT}}
+.mtg-mid{flex:1;min-width:0}
+.mtg-title{font-size:13px;font-weight:600;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mtg-badges{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+.mtg-b{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;color:#56527a;background:#EEF0F7;border-radius:20px;padding:2px 8px;text-decoration:none}
+.mtg-b.link{color:${COBALT};background:color-mix(in srgb,${COBALT} 8%,#fff)}
+.mtg-b.type{background:color-mix(in srgb,#7A5CC8 12%,#fff);color:#6A4CB8}
+.mtg-row.held{border-color:color-mix(in srgb,${GREEN} 35%,#fff);background:color-mix(in srgb,${GREEN} 4%,#fff)}
+.mtg-row.noshow{border-color:#F0C9C4;background:rgba(209,67,67,.04)}
+.mtg-status{display:flex;gap:5px;flex:none}
+.ms-b{display:inline-flex;align-items:center;gap:4px;border:1px solid #E4E5EF;background:#fff;border-radius:20px;padding:4px 9px;font-size:10.5px;font-weight:700;color:#8b88a0;cursor:pointer}
+.ms-b.held.on{border-color:${GREEN};background:color-mix(in srgb,${GREEN} 12%,#fff);color:#1a7d46}
+.ms-b.no.on{border-color:${RED};background:rgba(209,67,67,.1);color:#b4322e}
+.ms-b:hover{border-color:#C9C5D9}
+.mtype-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.mtype-row.sm{margin:8px 0 0}
+.mtype{border:1px solid #E4E5EF;background:#fff;border-radius:20px;padding:5px 11px;font-size:11.5px;font-weight:700;color:#56527a;cursor:pointer}
+.mtype.on{border-color:#7A5CC8;background:color-mix(in srgb,#7A5CC8 8%,#fff);color:#6A4CB8}
+.mod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.mod-row{display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #EDEEF5;border-radius:10px;background:#FAFAFE;cursor:pointer;font-size:13px;font-weight:600;color:#8b88a0}
+.mod-row.on{border-color:color-mix(in srgb,${GREEN} 30%,#fff);background:color-mix(in srgb,${GREEN} 5%,#fff);color:${INK}}
+.mod-row input{display:none}
+.mod-row span{flex:1}
+.mt-break{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:-4px 0 18px;padding:11px 15px;background:#fff;border:1px solid #EAEBF2;border-radius:12px}
+.mtb-l{font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#a6a2bc}
+.mtb{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#56527a;font-weight:600;background:#F5F6FB;border-radius:20px;padding:3px 11px}
+.mtb b{font-size:14px;color:${INK};font-family:'Space Grotesk',sans-serif}
+.kpi.clickable{cursor:pointer;transition:.14s}
+.kpi.clickable:hover{transform:translateY(-1px);box-shadow:0 10px 24px -16px rgba(24,21,48,.45)}
+.kpi.active{outline:2px solid ${COBALT};outline-offset:-2px}
+.kpi-ch{margin-left:auto;opacity:.5;transition:transform .16s}
+.kpi-ch.on{transform:rotate(180deg);opacity:1}
+.drill{background:#fff;border:1px solid #EAEBF2;border-radius:14px;margin:-4px 0 18px;overflow:hidden;animation:pop .16s ease}
+.drill-h{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #F0F1F7;background:#FBFBFE}
+.drill-t{font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:${INK}}
+.drill-s{font-size:12px;color:#8b88a0;font-weight:600}
+.drill-b{max-height:420px;overflow-y:auto;padding:8px 10px}
+.drow{display:flex;align-items:center;gap:12px;padding:9px 11px;border-radius:9px}
+.drow:hover{background:#FAFAFE}
+.drow+.drow{border-top:1px solid #F4F4FA}
+.drow.untyped{background:color-mix(in srgb,#E0662B 5%,#fff)}
+.drow-m{flex:1;min-width:0}
+.drow-t{font-size:13.5px;font-weight:700;color:${INK};cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.drow-t:hover{color:${COBALT};text-decoration:underline}
+.drow-v{font-size:13px;font-weight:700;color:${INK};white-space:nowrap;flex:none}
+.mtg-type{border:1px solid #E4E5EF;border-radius:20px;padding:4px 9px;font-size:11.5px;font-weight:700;color:#6A4CB8;background:color-mix(in srgb,#7A5CC8 8%,#fff);cursor:pointer;flex:none}
+".mtg-type.unset{color:#C05A1E;background:color-mix(in srgb,#E0662B 9%,#fff);border-color:#F0C09B}
+.kgroup{font-size:10.5px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#a6a2bc;margin:2px 0 9px}
+.hud-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+.hud-t{font-size:21px;font-weight:800;color:${INK};font-family:'Space Grotesk',sans-serif}
+.hud-d{font-size:12.5px;color:#8b88a0;font-weight:600;margin-top:3px}
+.hud-empty{display:flex;flex-direction:column;align-items:center;gap:7px;text-align:center;background:#fff;border:1px dashed #DCDEEA;border-radius:14px;padding:30px 22px;margin-bottom:20px}
+.hud-empty svg{color:${COBALT}}
+.hud-empty b{font-size:15px;color:${INK}}
+.hud-empty span{font-size:13px;color:#8b88a0;max-width:460px;line-height:1.5}
+.hud-brief{background:linear-gradient(135deg,${INDIGO},${INK});border-radius:16px;padding:22px 24px;margin-bottom:22px;color:#fff}
+.hb-head{font-size:20px;font-weight:800;line-height:1.3;font-family:'Space Grotesk',sans-serif}
+.hb-read{font-size:14px;line-height:1.6;color:rgba(255,255,255,.82);margin:10px 0 0}
+.hb-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}
+.hb-col{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:13px 15px}
+.hb-ct{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,.62);margin-bottom:8px}
+.hb-col.win .hb-ct{color:#8FE3B4}
+.hb-col.warn .hb-ct{color:#F5C08E}
+.hb-li{font-size:13px;line-height:1.5;color:rgba(255,255,255,.9);padding:4px 0}
+.hb-li+.hb-li{border-top:1px solid rgba(255,255,255,.08)}
+.hb-focus{margin-top:14px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:13px 15px}
+.hb-focus .hb-ct{color:#BFC8FF}
+.hb-f{padding:6px 0;font-size:13px;line-height:1.5}
+.hb-f+.hb-f{border-top:1px solid rgba(255,255,255,.08)}
+.hb-f b{display:block;color:#fff;font-weight:700}
+.hb-f span{color:rgba(255,255,255,.72)}
+.hb-proj{display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:13px;line-height:1.55;color:rgba(255,255,255,.85);background:rgba(255,255,255,.07);border-radius:11px;padding:12px 15px}
+.hb-proj svg{flex:none;margin-top:2px;color:${GOLD}}
+.hb-when{margin-top:12px;font-size:11px;color:rgba(255,255,255,.45)}
+.hstats{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:11px;margin-bottom:20px}
+.hstat{background:#fff;border:1px solid #EAEBF2;border-radius:12px;padding:13px 15px}
+.hs-l{font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#a6a2bc}
+.hs-v{display:flex;align-items:baseline;gap:8px;font-size:23px;font-weight:800;color:${INK};margin:5px 0 2px;font-family:'Space Grotesk',sans-serif}
+.hs-p{font-size:11px;color:#b7b4c6}
+.dl{font-size:10.5px;font-weight:800;padding:1px 7px;border-radius:20px}
+.dl.up{background:color-mix(in srgb,${GREEN} 14%,#fff);color:#1a7d46}
+.dl.down{background:rgba(209,67,67,.11);color:#b4322e}
+.dl.flat{background:#F0F1F7;color:#8b88a0}
+.hlist{display:flex;flex-direction:column;gap:6px;margin-top:4px;max-height:330px;overflow-y:auto}
+.hli{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#56527a;padding:7px 10px;border-radius:9px;background:#FAFAFE;line-height:1.4}
+.hli svg{flex:none;color:#a6a2bc}
+.hli.win{background:color-mix(in srgb,${GREEN} 7%,#fff);color:#1a7d46}
+.hli.win svg{color:${GREEN}}
+.hli.bad{background:rgba(209,67,67,.06);color:#b4322e}
+.hli.bad svg{color:${RED}}
+.hli.warn{background:color-mix(in srgb,#E0662B 6%,#fff);color:#9a5a16}
+.hli.warn svg{color:#E0662B}
+.hli.done{color:#8b88a0}
+@media(max-width:820px){.hb-cols{grid-template-columns:1fr}}
+.kgoal{margin-top:9px}
+.kgbar{height:5px;border-radius:20px;background:rgba(24,21,48,.09);overflow:hidden}
+.kgbar div{height:100%;border-radius:20px;transition:width .35s}
+.kgt{display:flex;justify-content:space-between;align-items:center;margin-top:5px;font-size:10.5px;font-weight:700;color:#8b88a0}
+.kgt b{font-weight:800;color:${COBALT}}
+.kgt b.hit{color:${GREEN}}
+.kgt b.behind{color:#C05A1E}
+.kpi.accent .kgbar,.kpi.green .kgbar,.kpi.gold .kgbar{background:rgba(255,255,255,.28)}
+.kpi.accent .kgt,.kpi.green .kgt,.kpi.gold .kgt{color:rgba(255,255,255,.75)}
+.kpi.accent .kgt b,.kpi.green .kgt b,.kpi.gold .kgt b{color:#fff}
+.goal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.goal-row{display:flex;align-items:center;gap:12px;padding:11px 13px;border:1px solid #EDEEF5;border-radius:10px;background:#FAFAFE}
+.goal-l{flex:1;min-width:0;display:flex;flex-direction:column}
+.goal-l b{font-size:13px;color:${INK};font-weight:700}
+.goal-l span{font-size:11px;color:#9b98ad}
+.goal-in{display:flex;align-items:center;gap:3px;flex:none;border:1px solid #E1E2EC;border-radius:9px;background:#fff;padding:0 9px}
+.goal-in i{font-style:normal;font-size:12px;color:#a6a2bc;font-weight:700}
+.goal-in input{width:74px;border:none;padding:8px 2px;font-size:14px;font-weight:700;color:${INK};text-align:right;background:none}
+.goal-in input:focus{outline:none}
+.kgroup+.kgrid{margin-bottom:16px}
+.funnel{display:flex;flex-direction:column;gap:9px;margin-top:6px}
+.fn-row{display:grid;grid-template-columns:104px 1fr 40px 44px 52px;align-items:center;gap:10px}
+.fn-row.fn-head{font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#b7b4c6}
+.fn-head .fn-c,.fn-head .fn-r{text-align:right}
+.fn-l{font-size:12.5px;font-weight:700;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fn-bar{height:11px;background:#F1F2F8;border-radius:20px;overflow:hidden}
+.fn-bar div{height:100%;border-radius:20px;transition:width .3s}
+.fn-c{font-size:13px;font-weight:800;color:${INK};text-align:right;font-family:'Space Grotesk',sans-serif}
+.fn-r{font-size:11.5px;font-weight:700;color:#8b88a0;text-align:right}
+.fn-r.close{font-weight:800;color:#1a7d46}
+.fn-r.close.warn{color:#c0392b}
+.an-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:11px;margin-bottom:18px}
+.an-card{background:#fff;border:1px solid #EAEBF2;border-radius:13px;padding:14px 16px}
+.an-card.warn{border-color:#FFD59E;background:color-mix(in srgb,#FFA500 6%,#fff)}
+.an-l{font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#a6a2bc}
+.an-v{font-size:27px;font-weight:800;color:${INK};font-family:'Space Grotesk',sans-serif;margin:4px 0 2px}
+.an-d{font-size:11.5px;color:#9b98ad}
+.src-list{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.src-row{display:grid;grid-template-columns:1fr 60px 60px 56px 90px;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;font-size:13px;color:${INK}}
+.src-row:not(.src-head):hover{background:#FAFAFE}
+.src-row.src-head{font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#b7b4c6}
+.src-row span:not(.src-name){text-align:right}
+.src-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.src-hi{color:#1a7d46;font-weight:800}
+.src-lo{color:#c0392b;font-weight:800}
+@media(max-width:640px){.fn-row{grid-template-columns:80px 1fr 30px 38px 44px;gap:7px}.src-row{grid-template-columns:1fr 40px 40px 44px;gap:6px}.src-row span:nth-child(5){display:none}}
+.web-fs{position:fixed;inset:0;z-index:80;background:#F4F6FB;display:flex;flex-direction:column;padding:16px 20px;animation:pop .16s ease}
+.web-fs .web-legend{flex:none;margin-bottom:8px}
+.web-fs .web-trace{flex:none}
+.web-fs-stage{flex:1;min-height:0;background:#fff;border:1px solid #EAEBF2;border-radius:14px;overflow:hidden;margin-top:8px}
+@media(max-width:640px){.web-fs{padding:10px 12px}}
+.web-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:11.5px;color:#8b88a0;font-weight:600}
+.web-legend span{display:inline-flex;align-items:center;gap:5px}
+.web-legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
+.web-tip{color:#c0bdd0!important;font-weight:500}
+.web-trace{font-size:12.5px;color:#56527a;background:#F7F8FC;border:1px solid #EDEEF5;border-radius:9px;padding:8px 12px;margin-bottom:10px;line-height:1.5}
+.web-trace b{color:${INK}}
+.web-trace span{color:#5b3fa6;font-weight:600;cursor:pointer}
+.web-trace span:hover{text-decoration:underline}
+.web-scroll{overflow:auto;max-height:66vh;border:1px solid #F0F1F6;border-radius:10px;background:linear-gradient(#FCFCFE,#FCFCFE)}
+.web-svg{display:block}
+.web-you{fill:${INK}}
+.web-youtxt{fill:#fff;font-size:12px;font-weight:700;font-family:'Space Grotesk',sans-serif}
+.web-link{fill:none;stroke:#DCDEEA;stroke-width:1.5}
+.web-link.you{stroke:#C9CBDA;stroke-dasharray:4 3}
+.web-link.on{stroke:${COBALT};stroke-width:2.5}
+.web-node{cursor:pointer}
+.web-node rect{transition:.12s}
+.web-node.dim{opacity:.32}
+.web-node:hover rect:first-child{filter:drop-shadow(0 3px 8px rgba(0,0,0,.13))}
+.web-name{font-size:12px;font-weight:700;fill:${INK};font-family:'Inter',sans-serif}
+.web-co{font-size:9.5px;fill:#9b98ad;font-family:'Inter',sans-serif}
+.web-kids{font-size:9.5px;font-weight:700;fill:#56527a}
+.scope-seg{flex:none}
+.scope-seg button{display:inline-flex;align-items:center;gap:6px}
+.scope-seg button i{font-style:normal;font-size:10px;font-weight:800;padding:1px 6px;border-radius:20px;background:#DFE2EE;color:#56527a;min-width:16px;text-align:center}
+.scope-seg button.on i{background:${COBALT};color:#fff}
+.claim-btn{display:inline-flex;align-items:center;gap:5px;border:1px solid ${COBALT};background:rgba(43,77,224,.06);color:${COBALT};font-size:11.5px;font-weight:700;padding:5px 11px;border-radius:20px;cursor:pointer;white-space:nowrap}
+.claim-btn:hover{background:${COBALT};color:#fff}
+.pool-note{display:flex;align-items:center;gap:7px;font-size:12.5px;color:#56527a;background:#F4F5FA;border:1px solid #E5E6F0;border-radius:9px;padding:9px 12px;margin-bottom:12px}
+.own-badge{font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:#EEF0F7;color:#4a4763}
+.fu-scope{margin-bottom:14px}
+.fu-owner{margin-top:8px}
+.team-list{display:flex;flex-direction:column;gap:8px}
+.team-row{display:flex;align-items:center;gap:11px;padding:10px 12px;border:1px solid #EDEEF5;border-radius:10px;background:#FAFAFE}
+.team-av{width:28px;height:28px;border-radius:50%;background:${INK};color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex:none}
+.team-name{font-weight:700;color:${INK};font-size:13.5px;flex:1;min-width:0}
+.team-seg{flex:none}
+.team-seg button{font-size:11.5px;padding:5px 11px}
+@media(max-width:640px){.team-row{flex-wrap:wrap}.team-seg{width:100%}.team-seg button{flex:1}}
+.imp-sub{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#8b88a0;margin-bottom:8px}
+.imp-map{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.imp-row{display:flex;align-items:center;gap:7px;background:#F7F8FC;border:1px solid #EDEEF5;border-radius:9px;padding:7px 10px}
+.imp-h{flex:1;min-width:0;font-size:12.5px;font-weight:600;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.imp-row select{border:1px solid #E1E2EC;border-radius:7px;padding:5px 7px;font-size:12px;color:${INK};background:#fff;max-width:130px}
+.imp-warn{display:flex;align-items:center;gap:6px;font-size:12px;color:#9a5a16;background:#FFF7ED;border:1px solid #FCD9B6;border-radius:8px;padding:8px 11px;margin-top:10px}
+@media(max-width:640px){.imp-map{grid-template-columns:1fr}}
+.act-types{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.act-t{font-size:12px;font-weight:600;padding:6px 10px;border-radius:9px;border:1px solid #DEDFEA;background:#fff;color:#56527a;cursor:pointer;display:flex;align-items:center;gap:5px}
+.act-t.on{border-color:${COBALT};background:rgba(43,77,224,.08);color:${COBALT}}
+.act-input{width:100%;padding:11px 12px;border:1px solid #DEDFEA;border-radius:10px;font-size:13.5px;font-family:'Inter';resize:vertical;min-height:52px}
+.act-input:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.feed{margin-top:14px;display:flex;flex-direction:column;overflow-y:auto}
+.fitem{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid #F0F0F6}.fitem:last-child{border:none}
+.fic{width:30px;height:30px;border-radius:8px;background:rgba(43,77,224,.09);color:${COBALT};display:flex;align-items:center;justify-content:center;flex:none}
+.fitem.note .fic{background:rgba(200,162,74,.16);color:#9A7B22}
+.fitem .ftxt{font-size:13px;color:#3a3658;line-height:1.45}.fitem .fmeta{font-size:11px;color:#A6A2BC;margin-top:3px;font-weight:600}
+.fitem .fdel{margin-left:auto;background:none;border:none;color:#C9C5D9;cursor:pointer;padding:3px;flex:none}.fitem .fdel:hover{color:${RED}}
+/* settings */
+.set-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #F0F0F6}.set-row:last-child{border:none}
+.opt-chip{display:inline-flex;align-items:center;gap:7px;background:#F1F2F8;border-radius:8px;padding:6px 8px 6px 11px;font-size:13px;color:#3a3658;margin:0 7px 7px 0}
+.opt-chip button{background:none;border:none;color:#A6A2BC;cursor:pointer;display:flex}.opt-chip button:hover{color:${RED}}
+.addrow{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.addrow input,.addrow select{padding:9px 11px;border:1px solid #DEDFEA;border-radius:9px;font-size:13.5px;font-family:'Inter'}
+.swatch{width:26px;height:26px;border-radius:7px;border:1px solid #E0E0EC;flex:none;cursor:pointer;padding:0}
+.logo-drop{border:2px dashed #DEDFEA;border-radius:14px;padding:26px;text-align:center;cursor:pointer;color:#8E89A8;transition:.15s}.logo-drop:hover{border-color:${COBALT};color:${COBALT};background:rgba(43,77,224,.03)}
+.logosize{margin-top:14px;max-width:340px}
+.logosize-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.logosize-h span{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#928DAD}
+.logosize-h b{font-family:'Space Grotesk';font-size:13px;color:${INK}}
+.logosize input[type=range]{width:100%;-webkit-appearance:none;appearance:none;height:6px;border-radius:6px;background:#E4E5EF;outline:none}
+.logosize input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;background:${COBALT};cursor:pointer;border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.logosize input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:${COBALT};cursor:pointer;border:3px solid #fff}
+.note{background:#FBF6E9;border:1px solid #EBDCB5;border-radius:12px;padding:14px 16px;font-size:13px;color:#7a6320;line-height:1.5}.note b{color:#5e4c12}
+.convert-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(135deg,rgba(43,77,224,.08),rgba(59,52,112,.08));border:1px solid #D9DCF2;border-radius:14px;padding:14px 16px;margin-bottom:18px}
+.convert-banner b{font-family:'Space Grotesk';font-size:15px;color:${INK}}
+.deliv{background:#fff;border:1px solid #E8E9F2;border-radius:14px;padding:16px 18px;margin-bottom:18px}
+.track{padding:12px 0;border-bottom:1px solid #F0F0F6}.track:last-of-type{border-bottom:none}
+.track-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.track-h b{font-family:'Space Grotesk';font-size:14px;color:${INK}}
+.track-h .phase{font-size:11.5px;font-weight:600;color:${COBALT};background:rgba(43,77,224,.09);padding:3px 9px;border-radius:20px}
+.pbar{height:7px;background:#ECECF4;border-radius:6px;overflow:hidden;margin-bottom:10px}
+.pbar>div{height:100%;border-radius:6px;background:linear-gradient(90deg,${COBALT},${GREEN});transition:width .4s}
+.mslist{display:flex;flex-direction:column;gap:2px}
+.ms{display:flex;align-items:center;gap:9px;padding:7px 6px;border-radius:8px;font-size:13.5px;color:#3a3658}
+.ms:hover{background:#FAFAFD}
+.ms .mcheck{display:flex;align-items:center;gap:9px;flex:1;cursor:pointer;min-width:0}
+.ms .mtxt{flex:1}.ms.on .mtxt{color:#8E89A8;text-decoration:line-through}
+.ms.over .mtxt{color:${RED}}
+.ms .mdate{font-size:11px;color:#A6A2BC;font-weight:600;white-space:nowrap}
+.ms .mdate.done{color:${GREEN}}
+.msdue-w{display:flex;align-items:center;gap:6px}
+.msdue-l{font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#A6A2BC}
+.ms.over .msdue-l{color:${RED}}
+.msdue{font-size:11.5px;font-weight:600;color:#56527a;border:1px solid #E0E1EE;border-radius:7px;padding:3px 6px;background:#fff;font-family:inherit;cursor:pointer}
+.msdue:hover{border-color:#C9CBE0}
+.msdue.over{border-color:${RED};color:${RED};background:rgba(209,67,67,.05)}
+.track-h .phase.od{color:${RED};background:rgba(209,67,67,.1)}
+.rdot.over{background:${RED};border-color:${RED}}
+.od-tag{color:${RED};font-weight:700}.due-tag{color:${COBALT};font-weight:600}
+.tbl-cap{padding:14px 16px;border-bottom:1px solid #E8E9F2;font-weight:600;color:${INK};font-family:'Space Grotesk'}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap}
+.badge.done{color:${GREEN};background:rgba(31,157,85,.1)}
+.badge.over{color:${RED};background:rgba(209,67,67,.1)}
+.deliv-done{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(31,157,85,.08);color:#157a41;font-size:12.5px;font-weight:600}
+.rtag{display:inline-block;margin-left:8px;font-size:9.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${GREEN};background:rgba(31,157,85,.1);padding:2px 7px;border-radius:20px;vertical-align:middle}
+.btn-s{background:#fff;color:${INK};border:1px solid #DEDFEA}.btn-s:hover{background:#F4F5FB;border-color:#CBCDDF}
+.inv-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.seg{display:inline-flex;background:#EEEFF6;border-radius:11px;padding:3px;gap:2px}
+.seg-b{border:none;background:none;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;color:#56527a;cursor:pointer;font-family:'Inter'}
+.seg-b.on{background:#fff;color:${COBALT};box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.badge.inv-draft{color:#56527a;background:#EAEBF3}.badge.inv-sent{color:${COBALT};background:rgba(43,77,224,.1)}
+.badge.inv-paid{color:${GREEN};background:rgba(31,157,85,.1)}.badge.inv-overdue{color:${RED};background:rgba(209,67,67,.1)}
+.inv-modal{width:1080px}
+.inv-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.inv-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:0;overflow:auto;flex:1}
+.inv-edit{padding:20px 22px;overflow:auto;border-right:1px solid #E8E9F2}
+.inv-preview-wrap{padding:24px;background:#ECEEF5;overflow:auto;display:flex;flex-direction:column;align-items:center}
+.inv-design-stage{border:1px solid #E3E4EE;border-radius:14px;overflow:hidden;margin-top:4px}
+.inv-design-stage .inv-preview-wrap{max-height:78vh}
+.inv-page-tools{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;width:100%;max-width:660px;margin:0 auto 14px}
+.sec-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #DEDFEA;border-radius:10px;padding:6px 10px;box-shadow:0 4px 16px -8px rgba(0,0,0,.18)}
+.sec-tl{font-size:11px;font-weight:800;color:${INK};letter-spacing:.01em}
+.sec-grp{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:#8b88a0;text-transform:uppercase;letter-spacing:.04em}
+.sec-grp .stp{width:22px;height:22px;border-radius:6px;border:1px solid #DEDFEA;background:#F7F8FC;color:${COBALT};font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.sec-grp .stp:hover{background:${COBALT};color:#fff;border-color:${COBALT}}
+.sec-grp .val{min-width:30px;text-align:center;font-size:11px;font-weight:700;color:${INK};text-transform:none}
+.sec-done{font-size:11px;font-weight:700;color:#fff;background:${COBALT};border:none;border-radius:7px;padding:6px 12px;cursor:pointer}
+.sec-hint{font-size:11px;color:#9b98ad;font-weight:500}
+.bk-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bk-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+.bk-chip{padding:7px 14px;border-radius:20px;border:1px solid #E1E2EC;background:#fff;font-size:13px;font-weight:600;color:#56527a;cursor:pointer}
+.bk-chip.on{background:${INK};color:#fff;border-color:${INK}}
+.bk-yr{margin-left:auto;display:flex;align-items:center;gap:8px}
+.bk-yr select{padding:8px 10px;border:1px solid #E1E2EC;border-radius:9px;font-size:13px;font-weight:600;color:${INK};background:#fff}
+.tx-type{display:inline-flex;align-items:center;gap:5px;font-weight:600;font-size:12.5px;color:${INK}}
+.tx-amt{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;font-size:14px}
+.tx-in{color:#1f9d63}.tx-out{color:#b4322e}
+.rc-btn{display:inline-flex;align-items:center;gap:4px;color:${COBALT};font-weight:600;font-size:12px;cursor:pointer}
+.rc-none{color:#c7c5d4}
+.ai-banner{display:flex;align-items:center;gap:8px;border-radius:10px;padding:9px 12px;font-size:12.5px;font-weight:600;margin-bottom:14px}
+.ai-reading{background:#EEF2FF;color:#3949c9}
+.ai-done{background:#E9F8EF;color:#1f8a55}
+.ai-off{background:#FBEFEF;color:#a23b34}
+.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+.rcfile{display:flex;align-items:center;gap:8px;background:#F4F5FA;border:1px solid #E5E6F0;border-radius:9px;padding:9px 11px;font-size:12.5px;color:${INK};margin-top:10px}
+.act-ctrl{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.seg{display:inline-flex;background:#EEF0F7;border-radius:9px;padding:3px}
+.seg button{border:none;background:none;padding:6px 13px;border-radius:7px;font-size:12.5px;font-weight:600;color:#56527a;cursor:pointer}
+.seg button.on{background:#fff;color:${INK};box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.act-nav{display:flex;align-items:center;gap:6px}
+.act-nav b{min-width:150px;text-align:center;font-size:13.5px;color:${INK};font-weight:700}
+.iconbtn{width:30px;height:30px;border-radius:8px;border:1px solid #E1E2EC;background:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#56527a}
+.iconbtn:hover{border-color:${COBALT};color:${COBALT}}
+.act-feedlist{display:flex;flex-direction:column}
+.act-row{display:flex;align-items:flex-start;gap:11px;padding:11px 4px;border-bottom:1px solid #F1F1F6;cursor:pointer}
+.act-row:hover{background:#FAFAFE}
+.act-ic{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;flex:none}
+.act-body{flex:1;min-width:0}
+.act-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.act-lead{font-weight:700;color:${INK};font-size:13.5px}
+.act-txt{color:#56527a;font-size:13px;margin-top:2px;line-height:1.45}
+.act-who{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:#EEF0F7;color:#4a4763}
+.act-time{margin-left:auto;font-size:11.5px;color:#9b98ad;white-space:nowrap}
+.act-daysep{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#9b98ad;margin:14px 0 4px;padding-top:8px;border-top:1px dashed #E4E5EE}
+.act-daysep:first-child{border-top:none;margin-top:0;padding-top:0}
+.swapbtn{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:#56527a;background:#fff;border:1px solid #DEDFEA;border-radius:8px;padding:6px 11px;cursor:pointer}
+.swapbtn:hover{border-color:${COBALT};color:${COBALT}}
+.inv-items-edit{display:flex;flex-direction:column;gap:7px}
+.iie-h,.iie-row{display:grid;grid-template-columns:1fr 56px 84px 76px 30px;gap:8px;align-items:center}
+.iie-h{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#928DAD;padding:0 2px}
+.iie-row input{padding:8px 9px;border:1px solid #DEDFEA;border-radius:8px;font-size:13px;font-family:'Inter';color:${INK};background:#fff;width:100%}
+.iie-row input:focus{outline:none;border-color:${COBALT};box-shadow:0 0 0 3px rgba(43,77,224,.13)}
+.iie-amt{font-size:13px;font-weight:600;color:${INK};text-align:right}
+.inv-preview{background:#fff;border-radius:3px;padding:6.5% 7%;box-shadow:0 14px 50px -16px rgba(0,0,0,.34);color:#3a3850;width:100%;max-width:660px;aspect-ratio:8.5/11;box-sizing:border-box}
+.ip-block{position:relative;margin-bottom:20px}
+.ip-block:last-child{margin-bottom:0}
+.ip-block.dragk{opacity:.4}
+.ip-drag{position:absolute;left:-26px;top:1px;width:20px;height:20px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#C4C1D6;cursor:grab;opacity:0;transition:.13s}
+.ip-block:hover .ip-drag{opacity:1}
+.ip-drag:hover{color:${COBALT};background:#F1F2F8}
+.ip-sec{cursor:pointer;border-radius:5px;transition:box-shadow .12s;outline-offset:3px}
+.ip-sec:hover{box-shadow:0 0 0 1px #DCDEEE}
+.ip-sec.sel{box-shadow:0 0 0 2px ${COBALT}}
+.ip-top{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:14px}
+.ip-top .ip-sec{padding:4px 6px;margin:-4px -6px}
+.ip-logo{max-height:42px;max-width:190px;object-fit:contain;display:block;margin-bottom:.7em}
+.ip-name{font-family:'Space Grotesk';font-size:1.65em;font-weight:600;color:${INK};margin-bottom:.45em;letter-spacing:-.01em}
+.ip-bizmeta{font-size:.95em;color:#8b88a0}
+.ip-meta{text-align:right;flex:none}
+.ip-meta.left{text-align:left}
+.ip-title{font-family:'Space Grotesk';font-size:1.4em;font-weight:700;letter-spacing:.16em;color:${COBALT};line-height:1}
+.ip-num{font-size:.95em;font-weight:600;color:#8b88a0;margin-top:.3em;letter-spacing:.03em}
+.ip-dates{margin-top:.9em;font-size:.95em;color:${INK}}.ip-dates div{display:flex;gap:1.3em;justify-content:flex-end;margin-top:.25em}.ip-meta.left .ip-dates div{justify-content:flex-start}.ip-dates span{color:#aaa6bd;text-transform:uppercase;letter-spacing:.05em;font-size:.82em;font-weight:600}
+.ip-stamp{display:inline-block;margin-top:.8em;font-size:.82em;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:.25em 1em;border-radius:20px}
+.ip-rule{height:1.5px;width:100%;border-radius:2px;margin:0 0 16px;opacity:.9}
+.ip-billto{color:#6a6788}
+.ip-billto .ip-lbl{font-size:.8em;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#aaa6bd;margin-bottom:.35em}
+.ip-billto .ip-btname{font-weight:700;font-size:1.15em;color:${INK};letter-spacing:-.01em}
+.ip-table{width:100%;border-collapse:collapse}
+.ip-table th{text-align:left;font-size:.78em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#aaa6bd;border-bottom:1.5px solid ${INK};padding:0 0 .6em}
+.ip-table th:nth-child(2),.ip-table th:nth-child(3),.ip-table th:nth-child(4){text-align:right}
+.ip-table td{padding:.65em 0;border-bottom:1px solid #F2F2F6;font-variant-numeric:tabular-nums}
+.ip-table td:nth-child(2),.ip-table td:nth-child(3),.ip-table td:nth-child(4){text-align:right;white-space:nowrap}
+.ip-table td:first-child{padding-right:1.3em;color:${INK}}
+.ip-totals{margin-left:auto;width:56%;min-width:200px}
+.ip-tr{display:flex;justify-content:space-between;padding:.35em 0;color:#6a6788;font-variant-numeric:tabular-nums}.ip-tr span{color:#9b98ad}.ip-tr b{font-weight:600;color:${INK}}
+.ip-grand{border-top:1.5px solid ${INK};margin-top:.45em;padding-top:.7em}.ip-grand span{color:${INK};font-weight:700;font-family:'Space Grotesk';letter-spacing:.01em}.ip-grand b{font-family:'Space Grotesk';font-size:1.32em;color:${COBALT}}
+.ip-pay{color:#6a6788;word-break:break-all}.ip-pay a{color:${COBALT};font-weight:600}
+.ip-notes{padding-top:12px;border-top:1px solid #F2F2F6;color:#9b98ad;white-space:pre-wrap}
+.acc-row{display:flex;gap:8px;align-items:center}
+.acc-row input[type=color]{width:42px;height:38px;padding:2px;border:1px solid #DEDFEA;border-radius:9px;background:#fff;cursor:pointer;flex:none}
+.acc-row input:not([type=color]){flex:1}
+.invrange{width:100%;-webkit-appearance:none;appearance:none;height:6px;border-radius:6px;background:#E4E5EF;outline:none;margin-top:8px}
+.invrange::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:${COBALT};cursor:pointer;border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.invrange::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:${COBALT};cursor:pointer;border:3px solid #fff}
+.inv-toggles{display:flex;flex-wrap:wrap;gap:18px;margin-top:14px}
+.invtog{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:${INK};cursor:pointer}
+.invtog input{width:16px;height:16px;accent-color:${COBALT};cursor:pointer}
+@media print{
+  body *{visibility:hidden!important}
+  #invprint,#invprint *{visibility:visible!important}
+  #invprint{position:absolute!important;left:0;top:0;width:100%;box-shadow:none!important;border-radius:0!important;padding:0!important}
+  .scrim2{position:static!important;background:none!important;padding:0!important}
+  .ip-drag,.inv-page-tools{display:none!important}
+  .ip-sec{box-shadow:none!important;cursor:default!important}
+  #invprint{box-shadow:none!important;min-height:0!important;padding:0!important}
+}
+.fu-hero{display:flex;align-items:center;gap:22px;background:linear-gradient(120deg,${INDIGO} 0%,${COBALT} 100%);border-radius:18px;padding:22px 26px;margin-bottom:22px;color:#fff;box-shadow:0 14px 40px -20px ${COBALT}}
+.fu-hero-l{flex:none}.fu-hero-n{font-family:'Space Grotesk';font-size:46px;font-weight:600;line-height:1}
+.fu-hero-lbl{font-size:13px;color:rgba(255,255,255,.78);margin-top:2px}
+.fu-hero-stats{display:flex;flex-wrap:wrap;gap:9px;flex:1}
+.fu-stat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;background:rgba(255,255,255,.14);padding:6px 12px;border-radius:20px;color:#fff}
+.fu-stat b{font-weight:700}.fu-stat.od{background:rgba(255,255,255,.16)}.fu-stat.od svg{color:#FFC9C9}.fu-stat.done svg{color:#9DEFC0}
+.fu-ring{width:70px;height:70px;border-radius:50%;background:conic-gradient(#fff calc(var(--p,0)*1%),rgba(255,255,255,.22) 0);display:flex;align-items:center;justify-content:center;flex:none}
+.fu-ring span{width:54px;height:54px;border-radius:50%;background:${INDIGO};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;font-family:'Space Grotesk';color:#fff}
+.fu-band{display:flex;align-items:center;gap:8px;font-family:'Space Grotesk';font-weight:600;font-size:13px;color:${INK};margin:18px 0 12px;text-transform:uppercase;letter-spacing:.04em}
+.fu-band.od{color:${RED}}
+.fu-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.fu-card{background:#fff;border:1px solid #E8E9F2;border-radius:14px;padding:16px;cursor:pointer;transition:transform .18s,box-shadow .18s,opacity .42s,scale .42s;display:flex;flex-direction:column;gap:11px}
+.fu-card:hover{transform:translateY(-3px);box-shadow:0 14px 30px -18px rgba(24,21,48,.4);border-color:#D9DBEC}
+.fu-card.od{border-left:4px solid ${RED}}
+.fu-card.leaving{opacity:0;scale:.88;transform:translateX(60px);pointer-events:none}
+.fu-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.fu-name{font-family:'Space Grotesk';font-weight:600;font-size:15px;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fu-meta{font-size:12.5px;color:#6a6788}
+.fu-act{display:flex;flex-direction:column;gap:10px;border-top:1px solid #F0F0F6;padding-top:11px}
+.fu-quick{display:flex;gap:8px}
+.fu-ic{width:34px;height:34px;border-radius:9px;background:#F4F5FB;color:${COBALT};display:flex;align-items:center;justify-content:center;text-decoration:none;transition:.14s}
+.fu-ic:hover{background:${COBALT};color:#fff}
+.fu-chips{display:flex;flex-wrap:wrap;gap:7px}
+.fu-chip{position:relative;border:1px solid #DEDFEA;background:#fff;color:${INK};font-size:12px;font-weight:600;font-family:'Inter';padding:7px 11px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:.14s}
+.fu-chip:hover{border-color:${COBALT};background:rgba(43,77,224,.06);color:${COBALT}}
+.fu-date{padding:7px 10px;color:#56527a}
+.fu-date input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.fu-done{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:70px 20px}
+.fu-done-burst{position:relative;margin-bottom:10px}
+.fu-done-ring{width:108px;height:108px;border-radius:50%;background:rgba(31,157,85,.1);display:flex;align-items:center;justify-content:center}
+.fu-done-burst .s1,.fu-done-burst .s2,.fu-done-burst .s3{position:absolute;color:${GOLD};animation:twk 1.8s ease-in-out infinite}
+.fu-done-burst .s1{top:-4px;right:6px;animation-delay:0s}.fu-done-burst .s2{bottom:6px;left:-2px;color:${COBALT};animation-delay:.5s}.fu-done-burst .s3{top:18px;right:-8px;color:${GREEN};animation-delay:1s}
+@keyframes twk{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
+.fu-done h2{font-family:'Space Grotesk';font-size:24px;color:${INK};margin:14px 0 6px}
+.fu-done p{font-size:14px;color:#6a6788;max-width:420px;line-height:1.5}
+.linkbtn{background:none;border:none;color:#A6A2BC;font-size:12px;font-weight:600;cursor:pointer;padding:8px 0 0;margin-top:6px}.linkbtn:hover{color:${RED}}
+.cli-prog{display:flex;align-items:center;gap:10px;min-width:160px}
+.cli-prog .pbar{flex:1;margin-bottom:0}.cli-prog .pp{font-size:12px;font-weight:600;color:${INK};min-width:34px}
+.rmap-board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(152px,1fr);gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px}
+.rmap-col{background:#F6F7FB;border-radius:12px;padding:8px;min-height:60px}
+.rmap-colh{display:flex;justify-content:space-between;font-size:11px;font-weight:700;color:#56527a;padding:4px 6px 10px;text-transform:uppercase;letter-spacing:.04em}
+.rmap-colh span{color:#928DAD}
+.rmap-card{background:#fff;border:1px solid #E8E9F2;border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer}
+.rmap-card:hover{border-color:#D9DBEC}
+.rc-n{font-weight:600;font-size:13px;color:${INK}}.rc-ph{font-size:11px;color:#777296;margin-top:4px}
+.rmap-empty{text-align:center;color:#C9C5D9;font-size:12px;padding:6px}
+.rmap-rows{border-top:1px solid #F0F0F6}
+.rmap-row{display:flex;align-items:center;gap:16px;padding:12px 4px;border-bottom:1px solid #F0F0F6;cursor:pointer}
+.rmap-row:last-child{border-bottom:none}.rmap-row:hover{background:#FAFAFD}
+.rr-name{width:180px;flex:none}
+.rr-tracks{display:flex;gap:22px;flex-wrap:wrap}
+.rr-track{display:flex;align-items:center;gap:9px}
+.rr-tl{font-size:10.5px;font-weight:700;color:#928DAD;text-transform:uppercase;letter-spacing:.04em;min-width:64px}
+.rr-dots{display:flex;gap:6px}
+.rdot{width:11px;height:11px;border-radius:50%;background:#E4E4EE;border:1px solid #D2D2E0}
+.rdot.on{background:${GREEN};border-color:${GREEN}}
+.iconbtn{background:#F1F2F8;border:none;border-radius:7px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#56527a;flex:none}.iconbtn:hover{background:#E6E7F1}.iconbtn:disabled{opacity:.35;cursor:default}
+@media(max-width:820px){
+  .sb{position:fixed;left:0;top:0;transform:translateX(-100%);transition:transform .25s;box-shadow:0 0 60px rgba(0,0,0,.4)}.sb.open{transform:none}.hamb{display:block}
+  .m-grid{grid-template-columns:1fr;overflow-y:auto}
+  .m-left,.m-right{overflow:visible}
+  .m-right{border-left:none;border-top:1px solid #E8E9F2}
+  .modal{max-height:94vh}
+  .m-foot{padding:11px 16px;flex-wrap:wrap}
+  .m-foot-n{width:100%;margin-left:0;white-space:normal}
+  .scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:25}.body{padding:18px}.top{padding:14px 18px}.fgrid{grid-template-columns:1fr}
+}
+/* ---- touch devices: stop iOS from zooming ----
+   Safari auto-zooms whenever you focus a field whose font-size is under 16px.
+   Forcing every control to 16px on touch screens removes the trigger entirely.
+   !important because many controls set their size inline. */
+@media (pointer:coarse){
+  input,select,textarea{font-size:16px !important}
+  .onb-due input,.day-date input{width:auto;max-width:160px}
+  .tier-pick select{padding:5px 10px}
+}
+/* never auto-resize text, and kill the double-tap-to-zoom gesture */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;touch-action:manipulation}
+button,a,label,select,input,textarea,.kcard,.fu-card,.cli-card,.rt-person,.msec-h,.rel-tier,.web-node{touch-action:manipulation}
+`;
+
+/* ===================== small UI ===================== */
+const StageBadge=({k,stages})=>{const s=sOf(k,stages);return <span className="pill" style={{background:s.color+'1A',color:s.color}}><span className="dot" style={{background:s.color}}/>{s.label}</span>;};
+const PriBadge=({p})=>{const x=PRIORITIES[p]||PRIORITIES.medium;return <span className="pill" style={{background:x.bg,color:x.color}}><Flag size={11}/>{x.label}</span>;};
+const Due=({iso})=>{if(!iso)return <span className="subcell">—</span>;const d=daysUntil(iso);let c='far',t=fmtDate(iso);if(d<0){c='over';t='Overdue · '+fmtDate(iso);}else if(d===0){c='today';t='Today';}else if(d<=7){c='soon';t=fmtDate(iso);}return <span className={'due '+c}>{t}</span>;};
+const tipStyle={borderRadius:10,border:'1px solid #E8E9F2',fontFamily:'Inter',fontSize:12,boxShadow:'0 8px 24px -12px rgba(0,0,0,.3)'};
+/* Sidebar identity: the ProyTech Business Suite eyebrow sits ABOVE the client's own
+   logo. logo defaults to /triplejmortgagelogo.png (dropped in public/); if it isn't
+   there yet the <img> hides itself and the text fallback shows. */
+const SUITE_LABEL='ProyTech Business Suite';
+const Brand=({logo,sub,size})=>{ const src=logo||'/triplejmortgagelogo.png';
+  return (<div className="sb-brand">
+    <div className="sb-suite">{SUITE_LABEL}</div>
+    <div className="sb-brandrow">
+      <img src={src} alt="" className="sb-logo" style={{maxHeight:size||34,maxWidth:(size||34)*5}} onError={e=>{e.currentTarget.style.display='none';e.currentTarget.nextSibling&&(e.currentTarget.nextSibling.style.display='flex');}}/>
+      <div className="sb-fallback" style={{display:'none',alignItems:'center',gap:11}}><span className="nucleus"/><div><b>{sub||'Triple J Mortgage'}</b></div></div>
+    </div>
+  </div>);
+};
+
+/* ===================== login ===================== */
+function Login(){
+  const [u,setU]=useState('');const [p,setP]=useState('');const [err,setErr]=useState('');const [busy,setBusy]=useState(false);
+  const go=async()=>{ if(!u||!p){setErr('Enter your username and password.');return;} setBusy(true);setErr(''); try{ const {error}=await auth.login(u,p); if(error)setErr('Wrong username or password.'); }catch(e){ setErr('Could not sign in. Check your connection.'); } setBusy(false); };
+  return (<><style>{CSS}</style><div className="gate"><div className="gate-card">
+    <span className="nucleus" style={{width:18,height:18,margin:'0 auto 12px',display:'block'}}/>
+    <h2>{BRAND.title}</h2><p>Sign in</p>
+    <input placeholder="Username" value={u} autoFocus autoCapitalize="none" autoCorrect="off" onChange={e=>{setU(e.target.value);setErr('');}} onKeyDown={e=>e.key==='Enter'&&go()}/>
+    <input type="password" placeholder="Password" value={p} onChange={e=>{setP(e.target.value);setErr('');}} onKeyDown={e=>e.key==='Enter'&&go()}/>
+    {err&&<div className="gate-err">{err}</div>}
+    <button className="btn btn-p" style={{width:'100%',justifyContent:'center'}} disabled={busy} onClick={go}><Lock size={15}/>{busy?'Signing in…':'Sign in'}</button>
+  </div></div></>);
+}
+
+/* ===================== main ===================== */
+export default function App(){
+  /* VITE_DEMO_OPEN=true → no login screen: sign in anonymously in the background.
+     Demo/throwaway only. Anything with the link can see the data, so this must
+     point at a standalone demo database, never a real client's. */
+  const DEMO_OPEN=(import.meta.env.VITE_DEMO_OPEN||'').toString().trim().toLowerCase()==='true';
+  const [session,setSession]=useState(undefined);
+  const [bootErr,setBootErr]=useState(false);
+  const sessionResolved=React.useRef(false);
+  const [loaded,setLoaded]=useState(false);
+  const [leads,setLeads]=useState([]);
+  const [invoices,setInvoices]=useState([]);
+  const [txns,setTxns]=useState([]);
+  const [tasks,setTasks]=useState([]);
+  const [crmUsers,setCrmUsers]=useState([]);   // multi-user roster; empty = single-tenant, behaves as before
+  const [gcal,setGcal]=useState({connected:false,email:'',loaded:false});
+  const refreshGcal=async()=>{ try{ const r=await fetch('/api/google-status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
+  useEffect(()=>{ refreshGcal();
+    const p=new URLSearchParams(window.location.search);
+    if(p.get('gcal')){ const u=new URL(window.location.href); u.searchParams.delete('gcal'); u.searchParams.delete('reason'); window.history.replaceState({},'',u.pathname+u.search); }
+  },[]);
+  const disconnectGcal=async()=>{ try{ await fetch('/api/google-disconnect',{method:'POST'}); }catch{} setGcal({connected:false,email:'',loaded:true}); };
+  /* creates the event on Google Calendar; returns {eventId,htmlLink,meetLink}. Persistence
+     of the meeting onto the lead happens in the Modal (single patch) to avoid clobbering. */
+  const createCalendarEvent=async(m)=>{
+    const r=await fetch('/api/calendar-event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:m.title,start:m.start,end:m.end,notes:m.notes,attendees:m.attendees,meet:m.meet,timezone:'America/Chicago'})});
+    const j=await r.json().catch(()=>({ok:false,error:'bad response'}));
+    if(!j.ok) throw new Error(j.error==='not_connected'?'Google Calendar isn’t connected — connect it in Settings.':(j.error||'Could not create the event'));
+    return {eventId:j.eventId,htmlLink:j.htmlLink||'',meetLink:j.meetLink||''};
+  };
+  const deleteCalendarEvent=async(eventId)=>{ if(!eventId)return; try{ await fetch('/api/calendar-event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'delete',eventId})}); }catch{} };
+  const [invId,setInvId]=useState(null);
+  const [settings,setSettings]=useState(()=>({logo:'',logoSize:34,options:DEFAULT_OPTIONS,customFields:[],leadColumns:DEFAULT_LEAD_COLS,invoicing:DEFAULT_INVOICING,team:DEFAULT_TEAM,...presetSettingsPatch(PRESETS.lender)}));
+  const [page,setPage]=useState('dash');
+  const [sbOpen,setSbOpen]=useState(false);
+  const [activeId,setActiveId]=useState(null);
+  const [navIds,setNavIds]=useState(null);
+  const openLead=(id,order)=>{ setActiveId(id); setNavIds(order&&order.length?order:null); };
+
+  useEffect(()=>{ const ok=s=>{sessionResolved.current=true;setSession(s||null);};
+    if(DEMO_OPEN){ (async()=>{ try{ let s=await auth.session(); if(!s){ const {data,error}=await auth.loginAnon(); if(error) throw error; s=data?.session||null; } ok(s); }
+      catch(e){ console.error('demo anonymous sign-in failed — enable "Allow anonymous sign-ins" in Supabase Auth',e); ok(null); } })();
+      return; }
+    auth.session().then(ok).catch(()=>ok(null));
+    const {data:sub}=auth.onChange(ok);
+    const wd=setTimeout(()=>{ if(!sessionResolved.current) setBootErr(true); },8000);
+    return ()=>{clearTimeout(wd);sub?.subscription?.unsubscribe?.();}; },[]);
+
+  useEffect(()=>{ if(!session){setLoaded(false);return;} (async()=>{
+    try{
+      let s=await db.getLeads(); let st=await db.getSettings();
+      let iv=[]; try{ if(typeof db.getInvoices==='function') iv=await db.getInvoices(); }catch(err){ console.error('invoices load failed',err); }
+      let tx=[]; try{ if(typeof db.getTxns==='function') tx=await db.getTxns(); }catch(err){ console.error('txns load failed',err); }
+      let tk=[]; try{ if(typeof db.getTasks==='function') tk=await db.getTasks(); }catch(err){ console.error('tasks load failed',err); }
+      let usr=[]; try{ if(typeof db.getUsers==='function') usr=await db.getUsers(); }catch(err){ /* table missing / RLS → single-tenant */ }
+      setCrmUsers(Array.isArray(usr)?usr:[]);
+      if(!s||!s.length){ s=seed(); await db.upsertMany(s); }
+      if(!st){ /* fresh install: this is a lender-only product, so it comes up configured for lending */
+        st={logo:'',logoSize:34,options:DEFAULT_OPTIONS,customFields:[],leadColumns:DEFAULT_LEAD_COLS,invoicing:DEFAULT_INVOICING,team:DEFAULT_TEAM,...presetSettingsPatch(PRESETS.lender)};
+        await db.saveSettings(st); }
+      /* migrate the sales pipeline (idempotent) */
+      const mig=migrateStages(st,s);
+      if(mig.stagesChanged){ st={...st,stages:mig.stages}; await db.saveSettings(st); }
+      if(mig.changed.length){ s=mig.leads; try{ await db.upsertMany(mig.changed); }catch(err){ console.error('stage migration save failed',err); } }
+      setLeads(s); setInvoices(Array.isArray(iv)?iv:[]); setTxns(Array.isArray(tx)?tx:[]); setTasks(Array.isArray(tk)?tk:[]);
+      setSettings({logo:st.logo||'',logoSize:st.logoSize||34,options:{...DEFAULT_OPTIONS,...(st.options||{})},stages:st.stages?.length?st.stages:LENDER_STAGES,customFields:st.customFields||[],team:st.team||DEFAULT_TEAM,clientPhases:st.clientPhases?.length?st.clientPhases:LENDER_CLIENT_PHASES,onboardingItems:Array.isArray(st.onboardingItems)&&st.onboardingItems.length?st.onboardingItems:LENDER_ONB_ITEMS,preset:st.preset||'lender',comp:{...DEFAULT_COMP,...(st.comp||{})},goals:{...DEFAULT_GOALS,...(st.goals||{})},huddle:st.huddle||null,modules:Array.isArray(st.modules)?st.modules:presetSettingsPatch(PRESETS.lender).modules,leadColumns:st.leadColumns||DEFAULT_LEAD_COLS,deliveryTracks:st.deliveryTracks?.length?st.deliveryTracks:LENDER_DELIVERY_TRACKS,invoicing:{...DEFAULT_INVOICING,...(st.invoicing||{}),biz:{...DEFAULT_INVOICING.biz,...((st.invoicing||{}).biz||{})}}});
+      setLoaded(true);
+    }catch(e){ console.error(e); window.alert('Could not load data: '+(e.message||e)); }
+  })(); },[session]);
+
+  const stages=settings.stages?.length?settings.stages:LENDER_STAGES;
+  /* multi-user derivation. crm_users empty ⇒ single-tenant, everything below is a
+     no-op and the app behaves exactly as it did for two partners. These are plain
+     render-time consts, NOT hooks, so they sit safely above the auth early-returns. */
+  const multiUser=crmUsers.length>0;
+  const meUser=session?crmUsers.find(u=>u.id===auth.uid(session)):null;
+  const me=(meUser&&meUser.name)||cap(auth.username(session))||BRAND.team[0]||'';
+  const canManageTeam=!multiUser||(meUser&&meUser.role==='manager');
+  const nameToUid=name=>{ const u=crmUsers.find(x=>x.name===name); return u?u.id:null; };
+  const allPools=[...new Set(crmUsers.flatMap(u=>u.pools||[]))].sort();
+  /* keep data.owner (name) and the enforced owner_id column in lock-step */
+  const stampOwner=lead=>multiUser?{...lead,owner_id:nameToUid(lead.owner)||lead.owner_id||null}:lead;
+  /* relationships are people, not deals — keep them out of the sales views */
+  const bizLeads=useMemo(()=>leads.filter(l=>!l.isRelationship),[leads]);
+  const saveLeads=async n=>{ setLeads(n); try{ await db.deleteAll(); await db.upsertMany(n); }catch(e){ console.error(e); window.alert('Save failed: '+(e.message||e)); } };
+  const settingsTimer=React.useRef(null);
+  const saveSettings=n=>{ setSettings(n); if(settingsTimer.current)clearTimeout(settingsTimer.current); settingsTimer.current=setTimeout(()=>{ db.saveSettings(n).catch(console.error); },700); };
+  /* Apply a preset: rewrite stage + clientPhase keys on every lead by intent (so
+     nothing is orphaned), then swap the stage/phase/checklist/module settings.
+     Idempotent — applying the same preset twice changes nothing. */
+  const applyPreset=(presetKey)=>{ const preset=PRESETS[presetKey]; if(!preset)return;
+    const curStages=settings.stages?.length?settings.stages:DEFAULT_STAGES;
+    const {m:sMap,firstOpen}=stageIntentMap(curStages,preset.stages);
+    const pMap=phaseIntentMap(stdPhases(settings),preset.clientPhases);
+    const validStage=new Set(preset.stages.map(s=>s.key));
+    const validPhase=new Set(preset.clientPhases.map(p=>p.key));
+    const changed=[];
+    const nextLeads=leads.map(l=>{ let nl=l,touched=false;
+      if(l.stage&&!validStage.has(l.stage)){ nl={...nl,stage:sMap[l.stage]||firstOpen}; touched=true; }
+      if(l.clientPhase&&!validPhase.has(l.clientPhase)){ nl={...nl,clientPhase:pMap[l.clientPhase]||preset.clientPhases[0].key}; touched=true; }
+      if(touched) changed.push(nl); return nl; });
+    setLeads(nextLeads);
+    if(changed.length) db.upsertMany(changed).catch(e=>{console.error(e);window.alert('Preset applied, but saving the remapped leads failed: '+(e.message||e));});
+    saveSettings({...settings,...presetSettingsPatch(preset)});
+  };
+  /* ---- team management (manager-only; enforced in Postgres by RLS) ---- */
+  const reloadUsers=async()=>{ try{ const u=await db.getUsers(); setCrmUsers(Array.isArray(u)?u:[]); }catch(e){ console.error(e); } };
+  const teamAdd=async({name,email,role,pools})=>{
+    const nm=(name||'').trim()||(email||'').split('@')[0];
+    const inv=await db.inviteUser(email);
+    if(!inv.id) throw new Error('Supabase did not return a user id for '+email+'. Enable email signups (Authentication → Providers → Email) and try again.');
+    await db.upsertUser({id:inv.id,name:nm,role:role||'officer',pools:pools||[]});
+    try{ await auth.sendReset(inv.email); }catch(e){ console.error('reset email failed',e); }
+    if(!(settings.options?.owner||[]).includes(nm)) saveSettings({...settings,options:{...settings.options,owner:[...(settings.options.owner||OWNERS),nm]}});
+    await reloadUsers();
+  };
+  const teamUpdate=async(u)=>{ await db.upsertUser(u); await reloadUsers(); };
+  const teamRemove=async(id)=>{ await db.removeUser(id); await reloadUsers(); };
+  /* bootstrap: turn a single-tenant install into multi-user by making the signed-in
+     person the first manager, using their own auth uid (no invite needed) */
+  const teamBootstrapSelf=async(name)=>{ const id=auth.uid(session); if(!id) throw new Error('No active session.'); const nm=(name||'').trim()||me;
+    await db.upsertUser({id,name:nm,role:'manager',pools:[]});
+    if(!(settings.options?.owner||[]).includes(nm)) saveSettings({...settings,options:{...settings.options,owner:[...(settings.options.owner||OWNERS),nm]}});
+    await reloadUsers(); };
+  /* one-time backfill: map each lead's data.owner name → crm_users.name → owner_id.
+     Unmatched leads stay null (manager-only until assigned). Returns the counts. */
+  const backfillOwnerIds=async()=>{ const changed=[]; const next=leads.map(l=>{ const uidv=nameToUid(l.owner); if(uidv&&l.owner_id!==uidv){ const nl={...l,owner_id:uidv}; changed.push(nl); return nl; } return l; });
+    if(changed.length){ setLeads(next); await db.upsertMany(changed); }
+    const unmatched=leads.filter(l=>l.owner&&l.owner!==POOL_OWNER&&!nameToUid(l.owner)).length;
+    return {matched:changed.length,unmatched}; };
+  const saveInvoices=n=>{ setInvoices(n); if(typeof db.saveInvoices==='function') db.saveInvoices(n).catch(console.error); };
+  const saveTxns=n=>{ setTxns(n); if(typeof db.saveTxns==='function') db.saveTxns(n).catch(console.error); };
+  const upsertTxn=t=>{ const exists=txns.some(x=>x.id===t.id); saveTxns(exists?txns.map(x=>x.id===t.id?t:x):[t,...txns]); };
+  const deleteTxn=t=>{ saveTxns(txns.filter(x=>x.id!==t.id)); if(t.receipt?.path&&typeof db.removeReceipt==='function') db.removeReceipt(t.receipt.path).catch(console.error); };
+  const saveTasks=n=>{ setTasks(n); if(typeof db.saveTasks==='function') db.saveTasks(n).catch(console.error); };
+  const upsertTask=t=>{ const exists=tasks.some(x=>x.id===t.id); saveTasks(exists?tasks.map(x=>x.id===t.id?t:x):[t,...tasks]); };
+  const deleteTask=id=>{ saveTasks(tasks.filter(x=>x.id!==id)); };
+  const upsertInvoice=inv=>{ const exists=invoices.some(x=>x.id===inv.id); saveInvoices(exists?invoices.map(x=>x.id===inv.id?inv:x):[inv,...invoices]); };
+  const deleteInvoice=id=>{ saveInvoices(invoices.filter(x=>x.id!==id)); setInvId(null); };
+  const newInvoice=(lead)=>{ const ivset=settings.invoicing||DEFAULT_INVOICING; const number=(ivset.prefix||'INV-')+String(ivset.seq||1).padStart(4,'0'); saveSettings({...settings,invoicing:{...ivset,seq:(ivset.seq||1)+1}}); const issue=todayISO(); const inv={ id:uid(), number, clientId:lead?lead.id:'', billTo:lead?{name:lead.name||'',company:lead.company||'',email:lead.email||'',address:''}:{name:'',company:'',email:'',address:''}, issueDate:issue, dueDate:addDays(issue,ivset.terms||14), items:lead?itemsFromLead(lead):[{id:uid(),label:'',qty:1,amount:0}], taxRate:num(ivset.taxRate), notes:ivset.notes||'', paymentLink:ivset.paymentLink||'', status:'draft', paidDate:'', createdAt:new Date().toISOString() }; upsertInvoice(inv); setInvId(inv.id); };
+  const addOption=(listKey,val)=>{const v=(val||'').trim();if(!v)return;const cur=settings.options[listKey]||[];if(cur.includes(v))return;saveSettings({...settings,options:{...settings.options,[listKey]:[...cur,v]}});};
+
+  const updateLead=(id,patch)=>{ let updated=null; setLeads(leads.map(l=>{
+    if(l.id!==id) return l; const ts=new Date().toISOString(); const m={...l,...patch};
+    if(patch.stage&&patch.stage!==l.stage){
+      m.activities=[{id:uid(),ts,type:'Note',text:`Stage moved: ${sOf(l.stage,stages).label} → ${sOf(patch.stage,stages).label}`,who:me},...l.activities];
+      if(sOf(patch.stage,stages).won){
+        if(!l.closedAt) m.closedAt=todayISO();
+        /* Signed = auto-onboard: flip to client, seed the universal checklist, start Intake */
+        if(!l.isClient){
+          m.isClient=true; m.clientPhase=m.clientPhase||firstPhaseKey(settings); m.convertedAt=m.convertedAt||todayISO();
+          m.onboarding=(l.onboarding&&Object.keys(l.onboarding).length)?l.onboarding:seedOnboarding(onbItemsOf(settings));
+          m.activities=[{id:uid(),ts,type:'Note',text:'Signed — onboarding started.',who:me},...m.activities];
+        }
+      }
+    }
+    if(patch.retainerActive&&!l.retainerActive&&!l.retainerStart) m.retainerStart=todayISO();
+    /* claim-from-pool and any owner change re-point the enforced owner_id column */
+    if(multiUser&&('owner' in patch)) m.owner_id=nameToUid(m.owner)||null;
+    updated=m; return m;
+  })); if(updated) db.upsertLead(updated).catch(console.error); };
+  /* retro-tagging: set the meeting type on a logged 'Booked' activity, and on the
+     scheduled meeting it created (when there is one). */
+  const tagBooked=(leadId,actId,mtype)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==leadId)return l;
+    const src=(l.activities||[]).find(a=>a.id===actId); if(!src)return l;
+    const acts=(l.activities||[]).map(a=>a.id===actId?{...a,mtype}:a);
+    const mts=(l.meetings||[]).map(m=>(src.meetingId&&m.id===src.meetingId)?{...m,mtype}:m);
+    updated={...l,activities:acts,meetings:mts}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const tagMeeting=(leadId,meetingId,mtype)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==leadId)return l;
+    const mts=(l.meetings||[]).map(m=>m.id===meetingId?{...m,mtype}:m);
+    const acts=(l.activities||[]).map(a=>a.meetingId===meetingId?{...a,mtype}:a);
+    updated={...l,meetings:mts,activities:acts}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const addActivity=(id,type,text,who,extra)=>{if(!text.trim())return; let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l; updated={...l,activities:[{id:uid(),ts:new Date().toISOString(),type,text:text.trim(),who:who||me,...(extra&&typeof extra==='object'?extra:{})},...l.activities]}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const delActivity=(id,aid)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l; updated={...l,activities:l.activities.filter(a=>a.id!==aid)}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const delLead=id=>{ setLeads(leads.filter(l=>l.id!==id)); db.deleteLead(id).catch(console.error); setActiveId(null); };
+  const createNew=lead=>{ const L=stampOwner({...lead,owner_id:lead.owner_id||null}); setLeads([L,...leads]); db.upsertLead(L).catch(console.error); setActiveId(L.id); };
+  const importLeads=arr=>{ if(!arr||!arr.length)return; const stamped=arr.map(stampOwner); setLeads([...stamped,...leads]); (async()=>{ try{ await db.upsertMany(stamped); }catch(e){ console.error(e); window.alert('Some imported leads may not have saved: '+(e.message||e)); } })(); };
+  const convertToClient=id=>{ const l=leads.find(x=>x.id===id); if(!l)return; const ob=(l.onboarding&&Object.keys(l.onboarding).length)?l.onboarding:seedOnboarding(onbItemsOf(settings)); const updated={...l,isClient:true,clientPhase:l.clientPhase||firstPhaseKey(settings),convertedAt:l.convertedAt||todayISO(),delivery:l.delivery||{},onboarding:ob,activities:[{id:uid(),ts:new Date().toISOString(),type:'Note',text:'Loan file started — moved to processing.',who:me},...l.activities]}; setLeads(leads.map(x=>x.id===id?updated:x)); db.upsertLead(updated).catch(console.error); };
+  const revertClient=id=>{ const l=leads.find(x=>x.id===id); if(!l)return; const updated={...l,isClient:false}; setLeads(leads.map(x=>x.id===id?updated:x)); db.upsertLead(updated).catch(console.error); };
+  /* toggle one onboarding item + log it — single atomic write */
+  const toggleOnboarding=(id,itemKey)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l;
+    const ob={...(l.onboarding||{})}; const cur=normEntry(ob[itemKey]); const doneNow=!cur.done;
+    ob[itemKey]={done:doneNow?todayISO():null,due:cur.due||null};
+    const item=onbItemsOf(settings).find(i=>i.key===itemKey); const label=item?item.label:itemKey;
+    updated={...l,onboarding:ob,activities:[{id:uid(),ts:new Date().toISOString(),type:'Task',text:(doneNow?'✓ ':'unchecked: ')+label,who:me},...l.activities]};
+    return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const setOnboardingDue=(id,itemKey,date)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l; const ob={...(l.onboarding||{})}; const cur=normEntry(ob[itemKey]); ob[itemKey]={done:cur.done||null,due:date||null}; updated={...l,onboarding:ob}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  /* Phase 5: when a client enters Active, drop two recurring-cadence tasks onto them.
+     (No recurring engine — these are one-time tasks the owner recreates on completion.) */
+  const seedActiveTasks=(id,ownerHint)=>{ if(tasks.some(t=>t.leadId===id&&t.seededActive)) return;
+    const owner=ownerHint&&ownerHint!==POOL_OWNER?ownerHint:me;
+    const mk=(title,cadence,days)=>({...newTask(owner),title,leadId:id,seededActive:true,notes:`Recurring ${cadence} — recreate when done.`,due:addDays(todayISO(),days)});
+    saveTasks([mk('Monthly results text/email','monthly',30),mk('Quarterly system check + upsell scan','quarterly',90),...tasks]); };
+  /* set/advance a client's phase + log it; entering Active seeds handoff tasks */
+  const setClientPhase=(id,phase)=>{ const l=leads.find(x=>x.id===id); if(!l)return; let updated=null; setLeads(leads.map(x=>{ if(x.id!==id)return x;
+    updated={...x,isClient:true,clientPhase:phase,activities:[{id:uid(),ts:new Date().toISOString(),type:'Note',text:'Phase → '+phaseInfo(phase,settings,l).label,who:me},...x.activities]}; return updated; }));
+    if(updated){ db.upsertLead(updated).catch(console.error); if(phase==='active') seedActiveTasks(id,l.owner); } };
+  const addCustomPhase=(id,info)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l; const cp={key:'cp_'+uid(),label:(info.label||'Custom').trim(),color:info.color||'#7A5CC8',after:info.after||'build'}; updated={...l,customPhases:[...(l.customPhases||[]),cp]}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const removeCustomPhase=(id,key)=>{ let updated=null; setLeads(leads.map(l=>{ if(l.id!==id)return l; const cps=(l.customPhases||[]).filter(c=>c.key!==key); updated={...l,customPhases:cps,clientPhase:l.clientPhase===key?'build':l.clientPhase}; return updated; })); if(updated) db.upsertLead(updated).catch(console.error); };
+  const toggleMilestone=(id,trackKey,milestone)=>{ const l=leads.find(x=>x.id===id); if(!l)return; const d={...(l.delivery||{})}; const tr={...(d[trackKey]||{})}; const cur=normEntry(tr[milestone]); const next={done:cur.done?null:todayISO(),due:cur.due||null}; if(!next.done&&!next.due) delete tr[milestone]; else tr[milestone]=next; d[trackKey]=tr; const patch={delivery:d}; const o=clientOverall({...l,delivery:d},settings.deliveryTracks||DEFAULT_DELIVERY_TRACKS); const won=(stages||[]).find(s=>s.won); if(o.delivered&&won&&l.stage!==won.key) patch.stage=won.key; updateLead(id,patch); };
+  const setMilestoneDue=(id,trackKey,milestone,date)=>{ const l=leads.find(x=>x.id===id); if(!l)return; const d={...(l.delivery||{})}; const tr={...(d[trackKey]||{})}; const cur=normEntry(tr[milestone]); const next={done:cur.done||null,due:date||null}; if(!next.done&&!next.due) delete tr[milestone]; else tr[milestone]=next; d[trackKey]=tr; updateLead(id,{delivery:d}); };
+  const active=activeId&&activeId!=='new'?leads.find(l=>l.id===activeId):null;
+
+  if(!configured) return (<><style>{CSS}</style><div className="gate"><div className="gate-card">
+    <span className="nucleus" style={{width:18,height:18,margin:'0 auto 10px',display:'block'}}/>
+    <h2>{BRAND.title}</h2>
+    <p style={{color:'#b4322e',lineHeight:1.5}}>This deployment isn't connected to a database yet. Add <b>VITE_SUPABASE_URL</b> and <b>VITE_SUPABASE_KEY</b> in Vercel → Settings → Environment Variables, then redeploy.</p>
+  </div></div></>);
+  if(session===undefined) return (<><style>{CSS}</style><div className="gate"><div className="gate-card"><span className="nucleus" style={{width:18,height:18,margin:'0 auto 10px',display:'block'}}/><h2>{BRAND.title}</h2>{bootErr?<><p style={{color:'#b4322e',lineHeight:1.5}}>Can't reach the database. Your Supabase project may be paused — open the Supabase dashboard and restore it, then retry.</p><button className="btn btn-p" style={{width:'100%',justifyContent:'center',marginTop:6}} onClick={()=>window.location.reload()}>Retry</button></>:<p>Loading…</p>}</div></div></>);
+  if(!session) return <Login/>;
+
+  const NAV=[['dash','Dashboard',<LayoutDashboard size={18}/>],['huddle','Monday Huddle',<Sparkles size={18}/>],['followup','Follow-Up',<Bell size={18}/>],['tasks','Tasks',<ListTodo size={18}/>],['activity','Activity',<List size={18}/>],['pipeline','Pipeline',<KanbanSquare size={18}/>],['leads','Leads',<Contact2 size={18}/>],['rels','Partners',<Users size={18}/>],['clients','Loans',<Building2 size={18}/>],['aitools','AI Tools',<Sparkles size={18}/>],['invoices','Invoices',<Receipt size={18}/>],['books','The Books',<BookText size={18}/>],['money','Money',<DollarSign size={18}/>],['team','Team',<Users size={18}/>],['settings','Settings',<Settings size={18}/>]];
+  /* if a section is switched off while you're standing on it, fall back to the
+     dashboard. Computed during render — deliberately NOT a hook, because this
+     sits after the auth early-returns above. */
+  const view=page==='team'?(canManageTeam?'team':'dash'):(modOn(settings,page)?page:'dash');
+  const titles={dash:['Dashboard','Your loan pipeline at a glance'],team:['Team','Add loan officers, set their role & pools — access is enforced in the database'],huddle:['Monday Morning Huddle','Last week, read and interpreted'],followup:['Follow-Up',"Clear every borrower that's due or overdue"],tasks:['Tasks','AI-ranked to-dos for your team'],activity:['Activity','Who did what — calls, texts, meetings & notes'],pipeline:['Pipeline','Drag a card to move a loan'],leads:['Leads','Every borrower, every conversation'],rels:['Referral Partners','The agents & partners who send you business — and who they introduced'],clients:['Loans in Process','Funded loans moving to the closing table'],invoices:['Invoices','Create, send & track payments'],books:['The Books','Money in, money out, draws & receipts'],money:['Money','Revenue, forecast & attribution'],settings:['Settings','Customize the CRM · back up your data']};
+
+  return (<><style>{CSS}</style><div className="pt">
+    {sbOpen&&<div className="scrim" onClick={()=>setSbOpen(false)}/>}
+    <aside className={'sb '+(sbOpen?'open':'')}>
+      <Brand logo={settings.logo} size={settings.logoSize||34} sub="Triple J Mortgage"/>
+      {NAV.filter(([k])=>k==='team'?canManageTeam:modOn(settings,k)).map(([k,l,ic])=><button key={k} className={'nav-i '+(view===k?'on':'')} onClick={()=>{setPage(k);setSbOpen(false);}}>{ic}{l}</button>)}
+      <button className="nav-i" style={{marginTop:8,background:'rgba(43,77,224,.16)',color:'#fff'}} onClick={()=>setActiveId('new')}><Plus size={18}/>New Lead</button>
+      {!DEMO_OPEN&&<button className="nav-i" onClick={()=>auth.logout()}><LogOut size={18}/>Sign out ({me})</button>}
+      <div className="sb-foot"><b>{BRAND.tagline}</b><br/>{BRAND.taglineSub}
+        <div style={{marginTop:8,fontSize:11,color:'#8b87a8'}}>Built by <a href="https://getproytech.com" target="_blank" rel="noreferrer" style={{color:'#9b97bd',textDecoration:'none',fontWeight:600}}>ProyTech</a></div>
+      </div>
+    </aside>
+    <div className="main">
+      <div className="top">
+        <div style={{display:'flex',alignItems:'center',gap:14}}>
+          <button className="hamb" onClick={()=>setSbOpen(true)}><Menu size={22}/></button>
+          <div><h1>{(titles[view]||[view,''])[0]}</h1><div className="sub">{(titles[page]||['',''])[1]}</div></div>
+        </div>
+        <button className="btn btn-p" onClick={()=>setActiveId('new')}><Plus size={16}/>New Lead</button>
+      </div>
+      <div className="body">
+        {!loaded?<div className="empty">Loading…</div>:
+          view==='huddle'?<Huddle leads={bizLeads} tasks={tasks} settings={settings} stages={stages} rels={leads.filter(l=>l.isRelationship)} saveSettings={saveSettings} me={me} open={()=>setPage('followup')}/>:
+          view==='dash'?<Dashboard leads={bizLeads} stages={stages} open={openLead} tagBooked={tagBooked} rels={leads.filter(l=>l.isRelationship)} settings={settings}/>:
+          view==='followup'?<FollowUp leads={leads} stages={stages} open={openLead} updateLead={updateLead} me={me} settings={settings} addActivity={addActivity}/>:
+          view==='tasks'?<Tasks tasks={tasks} leads={leads} me={me} upsertTask={upsertTask} deleteTask={deleteTask} saveTasks={saveTasks} open={openLead}/>:
+          view==='activity'?<Activity leads={leads} tasks={tasks} me={me} open={openLead}/>:
+          view==='pipeline'?<Pipeline leads={bizLeads} stages={stages} open={openLead} updateLead={updateLead} settings={settings} clients={bizLeads.filter(l=>l.isClient&&(l.clientPhase||'intake')!=='churned')} setClientPhase={setClientPhase}/>:
+          view==='leads'?<Leads leads={bizLeads} settings={settings} stages={stages} open={openLead} saveSettings={saveSettings} importLeads={importLeads} me={me} updateLead={updateLead}/>:
+          view==='rels'?<Relationships leads={leads} open={openLead} updateLead={updateLead}/>:
+          view==='clients'?<Clients leads={bizLeads} stages={stages} settings={settings} open={openLead} toggleOnboarding={toggleOnboarding} setOnboardingDue={setOnboardingDue} setClientPhase={setClientPhase} addCustomPhase={addCustomPhase} removeCustomPhase={removeCustomPhase}/>:
+          view==='invoices'?<Invoices invoices={invoices} leads={bizLeads} settings={settings} onNew={newInvoice} open={id=>setInvId(id)}/>:
+          view==='books'?<Books txns={txns} upsertTxn={upsertTxn} deleteTxn={deleteTxn}/>:
+          view==='money'?<Money leads={bizLeads} stages={stages}/>:
+          view==='aitools'?<AITools leads={bizLeads} stages={stages} settings={settings} gcalConnected={gcal.connected} open={openLead}/>:
+          view==='team'?<Team users={crmUsers} me={me} meUser={meUser} multiUser={multiUser} sessionUid={auth.uid(session)} sessionEmail={auth.email(session)} pools={allPools} onAdd={teamAdd} onUpdate={teamUpdate} onRemove={teamRemove} onBootstrapSelf={teamBootstrapSelf} onBackfill={backfillOwnerIds} leadCount={leads.length}/>:
+          <SettingsPage settings={settings} saveSettings={saveSettings} leads={leads} saveLeads={saveLeads} invoices={invoices} saveInvoices={saveInvoices} gcal={gcal} onDisconnectGcal={disconnectGcal} refreshGcal={refreshGcal} applyPreset={applyPreset}/>}
+      </div>
+    </div>
+    {(active||activeId==='new')&&<Modal key={activeId} lead={active} isNew={activeId==='new'} settings={settings} stages={stages} addOption={addOption} me={me} allLeads={leads} navList={(navIds&&navIds.length?navIds:leads.map(l=>l.id))} onNav={id=>setActiveId(id)} convertToClient={convertToClient} revertClient={revertClient} toggleMilestone={toggleMilestone} setMilestoneDue={setMilestoneDue} onClose={()=>setActiveId(null)} updateLead={updateLead} addActivity={addActivity} delActivity={delActivity} delLead={delLead} createNew={createNew} gcalConnected={gcal.connected} createCalendarEvent={createCalendarEvent} deleteCalendarEvent={deleteCalendarEvent} tagMeeting={tagMeeting} multiUser={multiUser} pools={allPools}/>}
+    {invId&&(()=>{const inv=invoices.find(x=>x.id===invId);return inv?<InvoiceModal key={invId} invoice={inv} leads={leads} settings={settings} saveSettings={saveSettings} onSave={upsertInvoice} onDelete={deleteInvoice} onClose={()=>setInvId(null)}/>:null;})()}
+  </div></>);
+}
+
+/* ===================== metrics ===================== */
+function useMetrics(leads,stages,settings){
+  return useMemo(()=>{
+    const byStage={}; stages.forEach(s=>byStage[s.key]={count:0,value:0});
+    let openCount=0,openValue=0,weighted=0,wonCount=0,wonValue=0,lostCount=0,mrr=0,retainers=0;
+    leads.forEach(l=>{const s=sOf(l.stage,stages);byStage[l.stage]=byStage[l.stage]||{count:0,value:0};byStage[l.stage].count++;byStage[l.stage].value+=num(l.dealValue);
+      if(s.open){openCount++;openValue+=num(l.dealValue);weighted+=num(l.dealValue)*num(s.prob);}
+      if(s.won){wonCount++;wonValue+=num(l.dealValue);} if(s.lost) lostCount++;
+      if(l.retainerActive){mrr+=num(l.retainer);retainers++;}});
+    const overdue=leads.filter(l=>l.followUp&&daysUntil(l.followUp)<0&&sOf(l.stage,stages).open);
+    const dueWeek=leads.filter(l=>{const d=l.followUp?daysUntil(l.followUp):null;return d!==null&&d>=0&&d<=7&&sOf(l.stage,stages).open;});
+    const hot=leads.filter(l=>l.priority==='high'&&sOf(l.stage,stages).open);
+    const winRate=(wonCount+lostCount)>0?wonCount/(wonCount+lostCount):0;
+    const avgDeal=wonCount>0?wonValue/wonCount:0; const avgRet=retainers>0?mrr/retainers:0;
+    /* meetings — ONE unified source (scheduled + logged), each counted once.
+       bookedMonth = when it was BOOKED (the action you're measured on this month);
+       heldMonth/noShowMonth = when it HAPPENS. */
+    const mKey=todayISO().slice(0,7);
+    let bookedAll=0,bookedMonth=0,mtgUpcoming=0,heldMonth=0,noShowMonth=0,heldAll=0,noShowAll=0,needsStatusCount=0,needsDateCount=0,onboardedMonth=0,depositsMonth=0;
+    const bookedByType={};
+    leads.forEach(l=>{
+      meetingsOf(l).forEach(mt=>{ bookedAll++;
+        const mk=meetingMonthKey(mt), bk=bookingMonthKey(mt);
+        if(bk===mKey){ bookedMonth++; const t=mt.mtype||'Other'; bookedByType[t]=(bookedByType[t]||0)+1; }
+        if(isUpcoming(mt)) mtgUpcoming++;
+        if(needsStatus(mt)) needsStatusCount++;
+        if(needsDate(mt)) needsDateCount++;
+        if(mt.status==='held'){ heldAll++; if(mk===mKey) heldMonth++; }
+        else if(mt.status==='noshow'){ noShowAll++; if(mk===mKey) noShowMonth++; }
+      });
+      if(l.isClient&&l.convertedAt&&String(l.convertedAt).slice(0,7)===mKey) onboardedMonth++;
+      const dep=l.onboarding&&l.onboarding.deposit_paid&&normEntry(l.onboarding.deposit_paid).done;
+      if(dep&&String(dep).slice(0,7)===mKey) depositsMonth++;
+    });
+    /* speed to first touch + follow-up discipline */
+    const touchHrs=[]; let untouched=0,fuCleared=0,fuOnTime=0;
+    leads.forEach(l=>{ const h=firstTouchHrs(l);
+      if(h==null){ if(!(l.activities||[]).some(REAL_TOUCH)) untouched++; } else touchHrs.push(h);
+      (l.activities||[]).forEach(a=>{ if(a&&a.fuOnTime!==undefined&&a.ts&&isoOf(new Date(a.ts)).slice(0,7)===mKey){ fuCleared++; if(a.fuOnTime) fuOnTime++; } }); });
+    /* monthly close figures — the all-time wonCount can't drive a monthly goal */
+    let closedMonth=0,revenueMonth=0;
+    leads.forEach(l=>{ if(sOf(l.stage,stages).won&&l.closedAt&&String(l.closedAt).slice(0,7)===mKey){ closedMonth++; revenueMonth+=num(l.dealValue); } });
+    const firstTouch=median(touchHrs);
+    const fuRate=fuCleared>0?fuOnTime/fuCleared:null;
+    const funnel=funnelOf(leads,stages);
+    /* ---------- higher-order sales analytics ---------- */
+    const decidedAll=heldAll+noShowAll;
+    const showRate=decidedAll>0?heldAll/decidedAll:0;      // held / (held+noshow), all time
+    const noShowRate=decidedAll>0?noShowAll/decidedAll:0;
+    /* meeting → close: of leads we held a QUALIFYING sales meeting with (before they
+       signed), how many converted. Coffee/onboarding/check-ins don't count. */
+    const ratioEx=ratioExcludeOf(settings);
+    let metLeads=0,metAndClosed=0,metNoSalesMtg=0,metAfterCloseOnly=0;
+    leads.forEach(l=>{ const held=meetingsOf(l).filter(m=>m.status==='held'); if(!held.length) return;
+      const rightType=held.filter(m=>countsToRatio(m,ratioEx)); if(!rightType.length){ metNoSalesMtg++; return; }
+      const qualifying=rightType.filter(m=>heldBeforeClose(m,l)); if(!qualifying.length){ metAfterCloseOnly++; return; }
+      metLeads++; if(l.isClient||sOf(l.stage,stages).won) metAndClosed++; });
+    const meetCloseRate=metLeads>0?metAndClosed/metLeads:0;
+    const cycleDays=[]; leads.forEach(l=>{ if((l.isClient&&l.convertedAt)||sOf(l.stage,stages).won){
+      const end=l.convertedAt||l.closedAt; if(l.createdAt&&end){ const d=(new Date(end)-new Date(l.createdAt))/864e5; if(!isNaN(d)&&d>=0) cycleDays.push(d); } } });
+    const avgDaysToClose=cycleDays.length?Math.round(median(cycleDays)):null;
+    const openLeadsArr=leads.filter(l=>sOf(l.stage,stages).open);
+    const rotting=openLeadsArr.filter(l=>daysSince(lastTouchTs(l)||l.createdAt||todayISO())>=14).length;
+    const movingPct=openLeadsArr.length?1-(rotting/openLeadsArr.length):1;
+    const bySource={}; leads.forEach(l=>{ const src=l.source||'—'; bySource[src]=bySource[src]||{total:0,won:0,value:0};
+      bySource[src].total++; if(l.isClient||sOf(l.stage,stages).won){ bySource[src].won++; bySource[src].value+=num(l.dealValue); } });
+    const sourceROI=Object.entries(bySource).map(([source,v])=>({source,...v,rate:v.total?v.won/v.total:0})).sort((a,b)=>b.won-a.won||b.total-a.total);
+    /* commission projections — earned on funded loans, projected on the open pipeline.
+       commPipeline = if every open loan funds; commWeighted = discounted by each stage's win %. */
+    const comp=compOf(settings);
+    let commFunded=0,commFundedMonth=0,commPipeline=0,commWeighted=0;
+    leads.forEach(l=>{ const s=sOf(l.stage,stages); const c=commissionOf(l,comp);
+      if(s.won){ commFunded+=c; if(l.closedAt&&String(l.closedAt).slice(0,7)===mKey) commFundedMonth+=c; }
+      else if(s.open){ commPipeline+=c; commWeighted+=c*num(s.prob); } });
+    /* ---- Conversations: a logged two-way contact (a Call or a Meeting activity).
+       Tracked as its own KPI so Jesse can see how many conversations it takes to make
+       a sale. convosPerFunded = conversations ÷ funded loans (all-time). ---- */
+    let convAll=0,convMonth=0;
+    leads.forEach(l=>{ (l.activities||[]).forEach(a=>{ if(a&&CONVO_TYPES.test(a.type||'')){ convAll++; if(a.ts&&isoOf(new Date(a.ts)).slice(0,7)===mKey) convMonth++; } }); });
+    const convosPerFunded=wonCount>0?convAll/wonCount:0;
+    /* ---- Pipeline Status: per-group roll-up for the dashboard widget. Reads the SAME
+       byStage tallies the KPI tiles use, so group sums can never drift from the tiles. */
+    const byGroup={}; STAGE_GROUPS.forEach(g=>byGroup[g]={count:0,value:0,stages:[]});
+    stages.forEach(s=>{ if(s.group&&byGroup[s.group]){ const b=byStage[s.key]||{count:0,value:0};
+      byGroup[s.group].count+=b.count; byGroup[s.group].value+=b.value;
+      byGroup[s.group].stages.push({key:s.key,label:s.label,color:s.color,count:b.count,value:b.value}); } });
+    return {byStage,byGroup,openCount,openValue,weighted,wonCount,wonValue,lostCount,mrr,retainers,overdue,dueWeek,hot,winRate,avgDeal,avgRet,
+      bookedAll,bookedMonth,mtgUpcoming,heldMonth,noShowMonth,heldAll,noShowAll,needsStatusCount,needsDateCount,showRate,noShowRate,bookedByType,onboardedMonth,depositsMonth,
+      firstTouch,untouched,touchHrs,fuCleared,fuOnTime,fuRate,funnel,closedMonth,revenueMonth,convAll,convMonth,convosPerFunded,
+      meetCloseRate,metLeads,metAndClosed,metNoSalesMtg,metAfterCloseOnly,ratioEx,avgDaysToClose,movingPct,rotting,sourceROI,
+      commFunded,commFundedMonth,commPipeline,commWeighted};
+  },[leads,stages,settings]);
+}
+
+/* ===================== Pipeline Status widget =====================
+   Grouped snapshot in the style of Jesse's screenshot. Reads m.byGroup, which is
+   built from the SAME byStage tallies as the KPI tiles — so the group totals here
+   equal Pipeline Volume / Funded Volume by construction, not by a second calculation. */
+function PipelineStatus({m}){
+  if(!m.openCount&&!m.wonCount) return null;
+  const maxCount=Math.max(1,...STAGE_GROUPS.flatMap(g=>(m.byGroup[g]?.stages||[]).map(s=>s.count)));
+  const axisMax=Math.max(5,Math.ceil(maxCount/5)*5);
+  const openV=['Prospect','Processing','Closing'].reduce((a,g)=>a+(m.byGroup[g]?.value||0),0);
+  const fundV=m.byGroup.Funded?.value||0;
+  return (<div className="ps-card">
+    <div className="ps-head"><div><h3>Pipeline Status</h3><span>Every loan in the book, by stage</span></div>
+      <span className="ps-per">YTD</span></div>
+    {STAGE_GROUPS.map(g=>{ const grp=m.byGroup[g]; if(!grp||!grp.stages.length) return null;
+      return (<div className="ps-grp" key={g}>
+        <div className="ps-grp-h"><b>{g}</b><span>{grp.count} loan{grp.count===1?'':'s'} · {usd(grp.value)}</span></div>
+        {grp.stages.map(s=>(<div className="ps-row" key={s.key}>
+          <div className="ps-name"><span className="ps-dot" style={{background:s.color}}/>{s.label}</div>
+          <div className="ps-cnt">{s.count}</div>
+          <div className="ps-val">{s.value>0?usd(s.value):'—'}</div>
+          <div className="ps-barwrap"><div className="ps-bar" style={{width:(s.count/axisMax*100)+'%',background:s.color}}/></div>
+        </div>))}
+      </div>);
+    })}
+    <div className="ps-tie"><span>Pipeline Volume<b>{usd(openV)}</b></span><span>Funded Volume<b>{usd(fundV)}</b></span></div>
+  </div>);
+}
+
+/* ===================== Dashboard "How do I…?" helper =====================
+   Small assistant that answers questions about USING the CRM. No data access. */
+function DashHelper(){
+  const [q,setQ]=useState(''); const [a,setA]=useState(''); const [busy,setBusy]=useState(false); const [open,setOpen]=useState(false);
+  const ask=async()=>{ if(!q.trim())return; setBusy(true); setA('');
+    try{ const r=await fetch('/api/ai-assistant',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({question:q})}).then(r=>r.json());
+      setA(r.ok?r.answer:(r.error==='AI not configured'?'The AI helper turns on once your ANTHROPIC_API_KEY is set in Vercel.':'Sorry — could not reach the helper.'));
+    }catch{ setA('The AI helper works on the deployed site.'); } setBusy(false); };
+  return (<div className={'dh-help'+(open?' open':'')}>
+    <div className="dh-bar" onClick={()=>setOpen(o=>!o)}><Sparkles size={14}/><span>Ask how to do something in the CRM</span><ChevronDown size={15} style={{marginLeft:'auto',transform:open?'rotate(180deg)':'none'}}/></div>
+    {open&&<div className="dh-body">
+      <div className="dh-in"><input value={q} placeholder="e.g. How do I log a conversation?" onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==='Enter'&&ask()}/><button className="btn btn-p" onClick={ask} disabled={busy}>{busy?'…':'Ask'}</button></div>
+      {a&&<div className="dh-ans">{a}</div>}
+    </div>}
+  </div>);
+}
+
+/* ===================== AI Tools tab =====================
+   Agentic helpers. The browser filters the lead list (cheap, no AI) and sends only the
+   relevant leads to /api/ai-tools, which drafts/thinks with Claude server-side. Drafted
+   emails can be dropped straight into Gmail drafts via the connected Google account. */
+function AITools({leads,stages,settings,gcalConnected,open}){
+  const [busy,setBusy]=useState(null); const [err,setErr]=useState('');
+  const [drafts,setDrafts]=useState(null); const [callList,setCallList]=useState(null);
+  const openL=leads.filter(l=>sOf(l.stage,stages).open);
+  const coldLeads=openL.filter(l=>daysSince(lastTouchTs(l)||l.createdAt||todayISO())>=45);
+  const expiring=leads.filter(l=>l.preApprovalExp&&daysUntil(l.preApprovalExp)>=0&&daysUntil(l.preApprovalExp)<=30);
+  const post=(url,body)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  const officer=(settings&&settings.team&&settings.team[0])||'';
+  const aiOffMsg='AI turns on once your ANTHROPIC_API_KEY is set in Vercel and the site is deployed.';
+  const runDrafts=async(list,kind,tag)=>{ setErr('');setDrafts(null);setCallList(null);
+    if(!list.length){setErr('No matching borrowers right now — nothing to draft.');return;}
+    setBusy(tag);
+    try{ const out=[];
+      for(const l of list.slice(0,8)){ const r=await post('/api/ai-tools',{tool:'draft_email',kind,officer,
+        lead:{name:l.name,loanPurpose:l.loanPurpose,loanType:l.loanType,dealValue:l.dealValue,note:l.nextSteps||'',stageLabel:sOf(l.stage,stages).label,lastContact:l.followUp}});
+        if(r.ok) out.push({lead:l,subject:r.subject,body:r.body,saved:false});
+        else if(r.error==='AI not configured'){setErr(aiOffMsg);break;} }
+      setDrafts(out);
+    }catch(e){setErr('Could not reach the AI service (works on the deployed site).');}
+    setBusy(null);
+  };
+  const runCallList=async()=>{ setErr('');setDrafts(null);setCallList(null);setBusy('call');
+    try{ const payload=openL.slice(0,40).map(l=>({name:l.name,stage:sOf(l.stage,stages).label,followUp:l.followUp,preApprovalExp:l.preApprovalExp,rateLockExp:l.rateLockExp,priority:l.priority,daysSinceTouch:daysSince(lastTouchTs(l)||l.createdAt||todayISO()),amount:l.dealValue}));
+      const r=await post('/api/ai-tools',{tool:'call_list',leads:payload});
+      if(r.ok)setCallList(r.items);else setErr(r.error==='AI not configured'?aiOffMsg:'Could not rank the list.');
+    }catch(e){setErr('Could not reach the AI service (works on the deployed site).');}
+    setBusy(null);
+  };
+  const saveDraft=async(d,i)=>{ const r=await post('/api/gmail-draft',{to:d.lead.email||'',subject:d.subject,body:d.body});
+    if(r.ok){ setDrafts(ds=>ds.map((x,j)=>j===i?{...x,saved:true}:x)); }
+    else{ setErr(r.error==='not_connected'?'Connect your Gmail in Settings → Google first.':'Could not save the draft to Gmail.'); } };
+  const TOOLS=[
+    {tag:'cold',title:'Re-engage cold leads',desc:`Draft a warm check-in for every open borrower untouched 45+ days. ${coldLeads.length} right now.`,run:()=>runDrafts(coldLeads,'cold','cold')},
+    {tag:'preapp',title:'Pre-approval check-ins',desc:`Draft a heads-up for pre-approvals expiring within 30 days. ${expiring.length} right now.`,run:()=>runDrafts(expiring,'preapproval','preapp')},
+    {tag:'call',title:'Who do I call today?',desc:'Rank the pipeline into a call list with a reason for each.',run:runCallList},
+    {tag:'refi',title:'Refi-watch outreach',desc:'Draft refinance outreach to funded clients (pulls your funded book).',run:()=>runDrafts(leads.filter(l=>sOf(l.stage,stages).won).slice(0,8),'refi','refi')},
+  ];
+  return (<>
+    <div className="kgroup">AI Tools <span style={{fontWeight:500,color:'#a6a2bc',textTransform:'none',letterSpacing:0}}>· runs on your data, drops drafts into your Gmail</span></div>
+    {!gcalConnected&&<div className="ai-note">Connect Gmail &amp; Calendar in <b>Settings → Google</b> so drafted emails can be saved to your Gmail drafts.</div>}
+    <div className="ai-grid">
+      {TOOLS.map(t=>(<div className="ai-card" key={t.tag}>
+        <div className="ai-ct">{t.title}</div><div className="ai-cd">{t.desc}</div>
+        <button className="btn btn-p" onClick={t.run} disabled={!!busy}>{busy===t.tag?'Working…':'Run'}</button>
+      </div>))}
+    </div>
+    {err&&<div className="ai-err">{err}</div>}
+    {callList&&<div className="ai-res"><div className="ai-rt">Call these borrowers first</div>
+      {callList.length?callList.map((it,i)=>(<div className="ai-row" key={i}><b>{i+1}. {it.name}</b><span>{it.reason}</span></div>)):<div className="empty">Nothing urgent — you're caught up.</div>}
+    </div>}
+    {drafts&&<div className="ai-res"><div className="ai-rt">{drafts.length} draft{drafts.length===1?'':'s'} ready — review, then save to Gmail</div>
+      {drafts.map((d,i)=>(<div className="ai-draft" key={i}>
+        <div className="ai-dh"><b onClick={()=>open&&open(d.lead.id)} style={{cursor:'pointer'}}>{d.lead.name}</b>
+          <button className="btn btn-s" onClick={()=>saveDraft(d,i)} disabled={d.saved}>{d.saved?'✓ Saved to Gmail':'Save to Gmail'}</button></div>
+        <div className="ai-dsub">{d.subject}</div>
+        <div className="ai-dbody">{d.body}</div>
+      </div>))}
+    </div>}
+  </>);
+}
+
+/* ===================== DASHBOARD ===================== */
+/* ===================== FOLLOW-UP ===================== */
+function FollowUp({leads,stages,open,updateLead,me,settings,addActivity}){
+  const [leaving,setLeaving]=useState({});
+  const [cleared,setCleared]=useState(0);
+  const t=todayISO();
+  const canAll=teamAccess(settings,me)==='all';
+  const [view,setView]=useState('mine');
+  useEffect(()=>{ if(!canAll&&view==='all') setView('mine'); },[canAll,view]);
+  const isDue=l=>l.followUp&&daysUntil(l.followUp)<=0;
+  const counts={mine:leads.filter(l=>isDue(l)&&l.owner===me).length,pool:leads.filter(l=>isDue(l)&&l.owner===POOL_OWNER).length,all:leads.filter(isDue).length};
+  /* lender expiries surface here the same way overdue follow-ups do */
+  const expiring=expiringList(leads,stages);
+  const due=scopeLeads(leads,view,me).filter(isDue).sort((a,b)=>(a.followUp||'').localeCompare(b.followUp||''));
+  const ids=due.map(l=>l.id);
+  const overdue=due.filter(l=>daysUntil(l.followUp)<0);
+  const today=due.filter(l=>daysUntil(l.followUp)===0);
+  const remaining=due.length;
+  const total=remaining+cleared;
+  const pct=total?Math.round(cleared/total*100):0;
+  /* FUB-style: the note lives with the date. Clearing a follow-up auto-logs the
+     old note to the activity feed, then asks for the next date + next note. */
+  const [pending,setPending]=useState(null); // {id,date,note}
+  const startNext=(l,date)=>{ if(leaving[l.id]||!date)return; setPending({id:l.id,date,note:''}); };
+  const confirmNext=l=>{
+    const p=pending; if(!p||p.id!==l.id)return;
+    const old=(l.nextSteps||'').trim();
+    const onTime=l.followUp?daysUntil(l.followUp)>=0:true;
+    if(addActivity) addActivity(l.id,'Note',old?`Follow-up done — ${old}`:'Follow-up cleared.',me,{fuOnTime:onTime});
+    setPending(null);
+    setLeaving(s=>({...s,[l.id]:true})); setCleared(c=>c+1);
+    setTimeout(()=>updateLead(l.id,{followUp:p.date,nextSteps:p.note.trim()}),430);
+  };
+  const QUICK=[['Tomorrow',1],['+3 days',3],['Next week',7],['+2 weeks',14]];
+  const Card=({l})=>{ const d=daysUntil(l.followUp); const od=d<0; const lv=!!leaving[l.id];
+    const lastTouch=(l.activities||[]).find(a=>a.type&&a.type!=='Note');
+    const pend=pending&&pending.id===l.id?pending:null;
+    return (<div key={l.id} className={'fu-card'+(od?' od':'')+(lv?' leaving':'')} onClick={()=>!lv&&!pend&&open(l.id,ids)}>
+      <div className="fu-top">
+        <div style={{minWidth:0}}><div className="fu-name">{l.name||'(no name)'}</div><div className="subcell">{[l.loanPurpose,l.loanType].filter(Boolean).join(' · ')||l.company||'—'}</div></div>
+        <span className={'badge '+(od?'inv-overdue':'inv-sent')}>{od?Math.abs(d)+'d overdue':'Due today'}</span>
+      </div>
+      {view!=='mine'&&<div className="fu-owner">{l.owner===POOL_OWNER?<button className="claim-btn" onClick={e=>{e.stopPropagation();updateLead(l.id,{owner:me});}}><UserCheck size={13}/>Claim</button>:<span className="own-badge">{l.owner||'—'}</span>}</div>}
+      {l.nextSteps?<div className="fu-plan"><StickyNote size={13}/><span>{l.nextSteps}</span></div>:null}
+      <div className="fu-meta">{l.nextAction||'Follow up'}{lastTouch?' · last touch '+fmtDate(lastTouch.ts):''}</div>
+      <div className="fu-act" onClick={e=>e.stopPropagation()}>
+        {pend?(<div className="fu-next">
+          <div className="fu-next-h"><CheckCircle2 size={13} color={GREEN}/>Next follow-up <b>{fmtDate(pend.date)}</b></div>
+          <textarea className="fu-note" rows={2} autoFocus placeholder="What's the plan for next time? (optional)" value={pend.note} onChange={e=>setPending({...pend,note:e.target.value})} onKeyDown={e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))confirmNext(l);}}/>
+          <div className="fu-next-b">
+            <button className="btn btn-p btn-sm" onClick={()=>confirmNext(l)}><CheckCircle2 size={14}/>Save &amp; clear</button>
+            <button className="btn btn-g btn-sm" onClick={()=>setPending(null)}>Cancel</button>
+            {(l.nextSteps||'').trim()&&<span className="fu-next-note">Old note gets logged to activity</span>}
+          </div>
+        </div>):(<>
+          <div className="fu-quick">
+            {l.phone&&<a className="fu-ic" href={'tel:'+l.phone} title="Call"><Phone size={15}/></a>}
+            {l.phone&&<a className="fu-ic" href={'sms:'+l.phone} title="Text"><MessageSquare size={15}/></a>}
+            {l.email&&<a className="fu-ic" href={'mailto:'+l.email} title="Email"><Mail size={15}/></a>}
+            {!l.phone&&!l.email&&<span className="subcell" style={{fontSize:11}}>no contact info</span>}
+          </div>
+          <div className="fu-chips">
+            {QUICK.map(([lbl,n])=><button key={lbl} className="fu-chip" onClick={()=>startNext(l,addDays(t,n))}>{lbl}</button>)}
+            <label className="fu-chip fu-date" title="Pick a date"><CalendarClock size={13}/><input type="date" min={t} onClick={e=>e.stopPropagation()} onChange={e=>startNext(l,e.target.value)}/></label>
+          </div>
+        </>)}
+      </div>
+    </div>);
+  };
+  const Scope=()=>(<div className="fu-scope"><ScopeSeg view={view} setView={setView} counts={counts} canAll={canAll}/></div>);
+  const ExpBlock=()=> expiring.length?(<>
+    <div className="fu-band od"><CalendarClock size={14}/>Expiring soon · {expiring.length}</div>
+    <div className="fu-grid">{expiring.map(({lead,label,date,days})=>(
+      <div key={lead.id+label} className={'fu-card'+(days<0?' od':'')} onClick={()=>open(lead.id)}>
+        <div className="fu-top"><div style={{minWidth:0}}><div className="fu-name">{lead.name||lead.company||'(no name)'}</div><div className="subcell">{label} · {fmtDate(date)}</div></div>
+          <span className={'badge '+(days<0?'inv-overdue':'inv-sent')}>{days<0?Math.abs(days)+'d expired':days===0?'expires today':days+'d left'}</span></div>
+        <div className="fu-meta">{[lead.loanPurpose,lead.loanType].filter(Boolean).join(' · ')}{lead.owner?' · '+lead.owner:''}</div>
+      </div>))}</div>
+  </>):null;
+  if(!due.length){ return (<><Scope/><ExpBlock/><div className="fu-done">
+    <div className="fu-done-burst"><Sparkles size={20} className="s1"/><Sparkles size={14} className="s2"/><Sparkles size={16} className="s3"/><div className="fu-done-ring"><CheckCircle2 size={54} color={GREEN}/></div></div>
+    <h2>{cleared>0?'Inbox zero. Nice work.':view==='mine'?'You\u2019re all caught up':view==='pool'?'Nothing waiting in the pool':'All caught up'}</h2>
+    <p>{cleared>0?`You cleared ${cleared} follow-up${cleared>1?'s':''} today — every lead's been handled.`:view==='mine'?(counts.pool>0?`Nothing of yours is due. There ${counts.pool===1?'is':'are'} ${counts.pool} unclaimed follow-up${counts.pool>1?'s':''} in the pool.`:(counts.all>0&&canAll?'Nothing of yours is due — switch to All to see the team\u2019s.':'Nothing is due or overdue right now.')):'Nothing is due or overdue right now. Set follow-up dates on your leads and they\u2019ll show up here the day they\u2019re due.'}</p>
+  </div></>); }
+  return (<>
+    <Scope/>
+    <ExpBlock/>
+    <div className="fu-hero">
+      <div className="fu-hero-l"><div className="fu-hero-n">{remaining}</div><div className="fu-hero-lbl">lead{remaining>1?'s':''} to clear</div></div>
+      <div className="fu-hero-stats">
+        {overdue.length>0&&<span className="fu-stat od"><AlertTriangle size={13}/><b>{overdue.length}</b> overdue</span>}
+        {today.length>0&&<span className="fu-stat"><CalendarClock size={13}/><b>{today.length}</b> due today</span>}
+        {cleared>0&&<span className="fu-stat done"><CheckCircle2 size={13}/><b>{cleared}</b> cleared</span>}
+      </div>
+      <div className="fu-ring" style={{'--p':pct}}><span>{pct}%</span></div>
+    </div>
+    {overdue.length>0&&<><div className="fu-band od"><AlertTriangle size={14}/>Overdue · {overdue.length}</div><div className="fu-grid">{overdue.map(l=>Card({l}))}</div></>}
+    {today.length>0&&<><div className="fu-band"><CalendarClock size={14}/>Due Today · {today.length}</div><div className="fu-grid">{today.map(l=>Card({l}))}</div></>}
+  </>);
+}
+
+function Dashboard({leads,stages,open,tagBooked,rels,settings}){
+  const G=goalsOf(settings);
+  const m=useMetrics(leads,stages,settings);
+  const [drill,setDrill]=useState(null);
+  const [scope,setScope]=useState('month');   // booked drill: this month vs all time
+  const tog=k=>{ setDrill(d=>d===k?null:k); };
+  const mKey=todayISO().slice(0,7);
+  const openLeads=leads.filter(l=>sOf(l.stage,stages).open).sort((a,b)=>num(b.dealValue)-num(a.dealValue));
+  const wonLeads=leads.filter(l=>sOf(l.stage,stages).won).sort((a,b)=>(b.closedAt||'').localeCompare(a.closedAt||''));
+  const retLeads=leads.filter(l=>l.retainerActive).sort((a,b)=>num(b.retainer)-num(a.retainer));
+  const onboardedLeads=leads.filter(l=>l.isClient&&l.convertedAt&&String(l.convertedAt).slice(0,7)===mKey);
+  const bookedRows=leads.flatMap(l=>(l.activities||[]).filter(a=>a.type==='Booked'&&a.ts)
+    .map(a=>({lead:l,act:a}))).filter(r=>scope==='all'||isoOf(new Date(r.act.ts)).slice(0,7)===mKey)
+    .sort((a,b)=>(b.act.ts||'').localeCompare(a.act.ts||''));
+  const untyped=bookedRows.filter(r=>!r.act.mtype).length;
+  const cold=coldList(rels||[]);
+  const LENDER=settings&&settings.preset==='lender';
+  const expiring=expiringList(leads,stages);
+  const heldRows=leads.flatMap(l=>(l.meetings||[]).filter(mt=>mt.status&&mt.start&&isoOf(new Date(mt.start)).slice(0,7)===mKey).map(mt=>({lead:l,mt})))
+    .sort((a,b)=>(b.mt.start||'').localeCompare(a.mt.start||''));
+  const Name=({l})=><span className="drow-t" onClick={()=>open(l.id)}>{l.name||l.company}</span>;
+  const Empty=({t})=><div className="empty" style={{padding:'18px 4px'}}>{t}</div>;
+  const stageData=stages.filter(s=>s.open).map(s=>({name:s.label,Leads:m.byStage[s.key]?.count||0,color:s.color}));
+  const revMix=[{name:'Closed Setup',value:m.wonValue},{name:'Annual MRR',value:m.mrr*12}].filter(d=>d.value>0);
+  const followUps=[...m.overdue,...m.dueWeek].sort((a,b)=>(a.followUp||'').localeCompare(b.followUp||'')).slice(0,8);
+  return (<>
+    <DashHelper/>
+    <div className="kgroup">Pipeline &amp; revenue</div>
+    <div className="kgrid">
+      <Kpi variant="accent" label="Pipeline Volume" value={usd(m.openValue)} icon={<KanbanSquare size={14}/>} d={`${m.openCount} loan${m.openCount===1?'':'s'} in play · ${usd(m.weighted)} weighted`} onClick={()=>tog('pipeline')} active={drill==='pipeline'}/>
+      {/* Funded volume and count are BOTH all-time so the dollars always match the count.
+         This-month figures live in the subtext, never in the headline number. */}
+      <Kpi label="Funded Volume" value={usd(m.wonValue)} icon={<Target size={14}/>} d={`${m.wonCount} loan${m.wonCount===1?'':'s'} funded${(m.revenueMonth>0||G.revenue>0)?` · ${usd(m.revenueMonth)}${G.revenue>0?` / ${usd(G.revenue)} goal`:''} this month`:''}`} onClick={()=>tog('won')} active={drill==='won'}/>
+      <Kpi variant="green" label="Loans Funded" value={m.wonCount} icon={<CheckCircle2 size={14}/>} d={`${m.closedMonth} funded this month${G.closed>0?` · goal ${G.closed}`:''}`} onClick={()=>tog('won')} active={drill==='won'}/>
+      <Kpi variant="gold" label="Avg Loan Size" value={m.wonCount>0?usd(m.avgDeal):'—'} icon={<DollarSign size={14}/>} d={`across ${m.wonCount} funded loan${m.wonCount===1?'':'s'}`}/>
+    </div>
+    <div className="kgroup">Your commission <span style={{fontWeight:500,color:'#a6a2bc',textTransform:'none',letterSpacing:0}}>· {num(compOf(settings).pct)}% of loan{num(compOf(settings).flat)>0?` + ${usd(compOf(settings).flat)}/loan`:''} · set in Settings</span></div>
+    <div className="kgrid">
+      <Kpi variant="green" label="Commission Earned" value={usd(m.commFunded)} icon={<DollarSign size={14}/>} d={`on ${m.wonCount} funded${m.commFundedMonth>0?` · ${usd(m.commFundedMonth)} this month`:''}`}/>
+      <Kpi variant="accent" label="Pipeline Commission" value={usd(m.commWeighted)} icon={<Percent size={14}/>} d={`weighted by stage · ${usd(m.commPipeline)} if every open loan funds`}/>
+      <Kpi label="Projected Total" value={usd(m.commFunded+m.commWeighted)} icon={<Target size={14}/>} d="earned + weighted pipeline"/>
+    </div>
+    <div className="kgroup">Activity &amp; health</div>
+    <div className="kgrid">
+      <Kpi variant="accent" label="Meetings Booked" value={m.bookedMonth} icon={<CalendarCheck size={14}/>} d={`this month · ${m.mtgUpcoming} upcoming · ${m.bookedAll} all time`} onClick={()=>tog('booked')} active={drill==='booked'} goal={G.booked} current={m.bookedMonth}/>
+      <Kpi label="Meetings Held" value={m.heldMonth} icon={<CheckCircle2 size={14}/>} d={(m.heldAll+m.noShowAll)>0?`${Math.round(m.showRate*100)}% show rate · ${m.noShowMonth} no-show${m.needsStatusCount>0?` · ${m.needsStatusCount} unmarked`:''}`:'mark meetings held to track'} onClick={()=>tog('held')} active={drill==='held'}/>
+      <Kpi label="Conversations" value={m.convMonth} icon={<MessageSquare size={14}/>} d={m.convAll>0?`${m.convAll} all time${m.wonCount>0?` · ${m.convosPerFunded.toFixed(1)} per funded loan`:''}`:'log a call or meeting to track'} onClick={()=>tog('conv')} active={drill==='conv'}/>
+      <Kpi variant="green" label="Loans Started" value={m.onboardedMonth} icon={<Rocket size={14}/>} d={`in processing this month`} onClick={()=>tog('onboarded')} active={drill==='onboarded'} goal={G.onboarded} current={m.onboardedMonth}/>
+      <Kpi label="Speed to First Touch" value={fmtHrs(m.firstTouch)} icon={<Zap size={14}/>} d={m.untouched>0?`${m.untouched} never contacted`:`median across ${m.touchHrs.length} leads`} onClick={()=>tog('speed')} active={drill==='speed'}/>
+      <Kpi label="Follow-Up Health" value={m.fuRate==null?'—':Math.round(m.fuRate*100)+'%'} icon={<Bell size={14}/>} d={m.overdue.length>0?`${m.overdue.length} overdue right now`:(m.fuCleared>0?`${m.fuOnTime}/${m.fuCleared} cleared on time`:'clear a follow-up to start')} onClick={()=>tog('fu')} active={drill==='fu'}/>
+      <Kpi label="Going Cold" value={cold.length} icon={<Users size={14}/>} d={cold.length>0?`${cold.filter(x=>x.tier==='champion').length} champion${cold.filter(x=>x.tier==='champion').length===1?'':'s'} need a touch`:'everyone is warm'} onClick={()=>tog('cold')} active={drill==='cold'}/>
+      {LENDER&&<Kpi label="Expiring" value={expiring.length} icon={<CalendarClock size={14}/>} d={expiring.length?`${expiring.filter(x=>x.days<0).length} expired · soonest ${expiring[0].days<0?Math.abs(expiring[0].days)+'d ago':(expiring[0].days===0?'today':'in '+expiring[0].days+'d')}`:'pre-approvals & rate locks current'} onClick={()=>tog('expiring')} active={drill==='expiring'}/>}
+    </div>
+
+    <PipelineStatus m={m} stages={stages}/>
+
+    {drill==='conv'&&<Drill title="Conversations" sub={`${m.convAll} calls & meetings logged${m.wonCount>0?` · ${m.convosPerFunded.toFixed(1)} per funded loan`:''}`} onClose={()=>setDrill(null)}>
+      <div className="empty" style={{padding:'14px 4px'}}>Every logged call and meeting counts as a conversation. The ratio tells you how many it takes to fund a loan — a live read on your close efficiency.</div>
+    </Drill>}
+
+    {drill==='pipeline'&&<Drill title="Open pipeline" sub={`${openLeads.length} active`} onClose={()=>setDrill(null)}>
+      {openLeads.length?openLeads.map(l=>(<div className="drow" key={l.id}>
+        <div className="drow-m"><Name l={l}/><div className="subcell">{sOf(l.stage,stages).label}{l.followUp?` · follow-up ${fmtDate(l.followUp)}`:''}</div></div>
+        <span className="drow-v">{num(l.dealValue)>0?usd(l.dealValue):'—'}</span>
+      </div>)):<Empty t="No open leads."/>}
+    </Drill>}
+
+    {drill==='won'&&<Drill title="Loans funded" sub={usd(m.wonValue)+' total volume'} onClose={()=>setDrill(null)}>
+      {wonLeads.length?wonLeads.map(l=>(<div className="drow" key={l.id}>
+        <div className="drow-m"><Name l={l}/><div className="subcell">{l.closedAt?`closed ${fmtDate(l.closedAt)}`:'—'}{l.owner?` · ${l.owner}`:''}</div></div>
+        <span className="drow-v">{usd(l.dealValue)}</span>
+      </div>)):<Empty t="No closed deals yet."/>}
+    </Drill>}
+
+    {drill==='mrr'&&<Drill title="Retainer clients" sub={usd(m.mrr)+'/mo'} onClose={()=>setDrill(null)}>
+      {retLeads.length?retLeads.map(l=>(<div className="drow" key={l.id}>
+        <div className="drow-m"><Name l={l}/><div className="subcell">{l.retainerStart?`since ${fmtDate(l.retainerStart)}`:'active'}</div></div>
+        <span className="drow-v">{usd(l.retainer)}/mo</span>
+      </div>)):<Empty t="No active retainers."/>}
+    </Drill>}
+
+    {drill==='booked'&&<Drill title="Meetings booked" sub={untyped>0?`${untyped} still need a type`:'all tagged'} onClose={()=>setDrill(null)}>
+      <div className="seg" style={{marginBottom:12}}>
+        <button className={scope==='month'?'on':''} onClick={()=>setScope('month')}>This month</button>
+        <button className={scope==='all'?'on':''} onClick={()=>setScope('all')}>All time</button>
+      </div>
+      {bookedRows.length?bookedRows.map(({lead,act})=>(<div className={'drow'+(act.mtype?'':' untyped')} key={act.id}>
+        <div className="drow-m"><Name l={lead}/><div className="subcell">{fmtStamp(act.ts)}{act.who?` · ${act.who}`:''}</div></div>
+        <select className={'mtg-type'+(act.mtype?'':' unset')} value={act.mtype||''} onChange={e=>tagBooked&&tagBooked(lead.id,act.id,e.target.value)}>
+          <option value="">+ set type</option>{MEETING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>)):<Empty t="No meetings booked in this window."/>}
+    </Drill>}
+
+    {drill==='held'&&<Drill title="Meetings this month" sub={`${m.heldMonth} held · ${m.noShowMonth} no-show`} onClose={()=>setDrill(null)}>
+      {heldRows.length?heldRows.map(({lead,mt})=>(<div className="drow" key={mt.id}>
+        <div className="drow-m"><Name l={lead}/><div className="subcell">{mt.title} · {fmtDate(mt.start)}{mt.mtype?` · ${mt.mtype}`:''}</div></div>
+        <span className={'badge '+(mt.status==='held'?'done':'over')}>{mt.status==='held'?'Held':'No-show'}</span>
+      </div>)):<Empty t="Nothing marked held or no-show yet this month."/>}
+    </Drill>}
+
+    {drill==='speed'&&<Drill title="Speed to first touch" sub={m.firstTouch!=null?`median ${fmtHrs(m.firstTouch)}`:'no touches yet'} onClose={()=>setDrill(null)}>
+      {(()=>{ const rows=leads.map(l=>({l,h:firstTouchHrs(l)}))
+          .filter(r=>r.h!=null||!(r.l.activities||[]).some(REAL_TOUCH))
+          .sort((a,b)=>(a.h==null?-1:1)-(b.h==null?-1:1)||((b.h||0)-(a.h||0)));
+        return rows.length?rows.map(({l,h})=>(<div className={'drow'+(h==null?' untyped':'')} key={l.id}>
+          <div className="drow-m"><Name l={l}/><div className="subcell">{h==null?'never contacted':`added ${fmtDate(l.createdAt)}`}</div></div>
+          <span className="drow-v">{h==null?'—':fmtHrs(h)}</span>
+        </div>)):<Empty t="No leads yet."/>; })()}
+    </Drill>}
+
+    {drill==='fu'&&<Drill title="Follow-ups overdue" sub={m.fuCleared>0?`${m.fuOnTime}/${m.fuCleared} cleared on time this month`:'tracking starts as you clear them'} onClose={()=>setDrill(null)}>
+      {m.overdue.length?[...m.overdue].sort((a,b)=>(a.followUp||'').localeCompare(b.followUp||'')).map(l=>(<div className="drow untyped" key={l.id}>
+        <div className="drow-m"><Name l={l}/><div className="subcell">{l.nextSteps||l.nextAction||'follow up'}</div></div>
+        <span className="drow-v" style={{color:RED}}>{Math.abs(daysUntil(l.followUp))}d late</span>
+      </div>)):<Empty t="Nothing overdue — you're clear."/>}
+    </Drill>}
+
+    {drill==='cold'&&<Drill title="Relationships going cold" sub={`champions ${COLD_DAYS.champion}d · b tier ${COLD_DAYS.b}d · new ${COLD_DAYS.new}d`} onClose={()=>setDrill(null)}>
+      {cold.length?cold.map(({r,tier,days,limit})=>(<div className={'drow'+(tier==='champion'?' untyped':'')} key={r.id}>
+        <div className="drow-m"><Name l={r}/><div className="subcell">{tierMeta(tier)[1]} · last touch {days>=9999?'never':fmtDate(lastTouchTs(r))}</div></div>
+        <span className="drow-v" style={{color:days>limit*2?RED:'#C05A1E'}}>{days>=9999?'never':days+'d ago'}</span>
+      </div>)):<Empty t="Everyone's been touched recently. Nice."/>}
+    </Drill>}
+
+    {drill==='expiring'&&<Drill title="Expiring pre-approvals & rate locks" sub={expiring.length?`${expiring.length} within 14 days`:'all current'} onClose={()=>setDrill(null)}>
+      {expiring.length?expiring.map(({lead,label,date,days})=>(<div className={'drow'+(days<0?' untyped':'')} key={lead.id+label}>
+        <div className="drow-m"><Name l={lead}/><div className="subcell">{label} · {fmtDate(date)}{lead.owner?` · ${lead.owner}`:''}</div></div>
+        <span className="drow-v" style={{color:days<0?RED:'#C05A1E'}}>{days<0?Math.abs(days)+'d ago':days===0?'today':days+'d left'}</span>
+      </div>)):<Empty t="Nothing expiring in the next two weeks."/>}
+    </Drill>}
+
+    {drill==='onboarded'&&<Drill title="Loans started this month" sub={`${m.onboardedMonth} moved into processing`} onClose={()=>setDrill(null)}>
+      {onboardedLeads.length?onboardedLeads.map(l=>{ const st=onboardingStat(l,onbItemsOf(settings));
+        return (<div className="drow" key={l.id}>
+          <div className="drow-m"><Name l={l}/><div className="subcell">since {fmtDate(l.convertedAt)} · {st.done}/{st.total} loan steps done</div></div>
+          <span className="drow-v">{num(l.dealValue)>0?usd(l.dealValue):'—'}</span>
+        </div>); }):<Empty t="No loans started this month."/>}
+    </Drill>}
+
+    {Object.keys(m.bookedByType||{}).length>0&&<div className="mt-break">
+      <span className="mtb-l">Booked this month</span>
+      {Object.entries(m.bookedByType).sort((a,b)=>b[1]-a[1]).map(([t,c])=><span key={t} className="mtb"><b>{c}</b>{t}</span>)}
+    </div>}
+    {m.funnel.length>1&&<div className="card" style={{marginBottom:18}}>
+      <h3>Conversion funnel</h3>
+      <div className="ch-sub">How far leads get, and the share of each stage that ultimately closes</div>
+      <div className="funnel">
+        <div className="fn-row fn-head"><span className="fn-l"></span><span></span><span className="fn-c">count</span><span className="fn-r">step</span><span className="fn-r">→ close</span></div>
+        {m.funnel.map((f,i)=>{ const top=m.funnel[0].count||1;
+        return (<div className="fn-row" key={f.key}>
+          <span className="fn-l">{f.label}</span>
+          <div className="fn-bar"><div style={{width:Math.max(2,Math.round(f.count/top*100))+'%',background:f.color||COBALT}}/></div>
+          <span className="fn-c">{f.count}</span>
+          <span className="fn-r">{i===0?'—':Math.round(f.rate*100)+'%'}</span>
+          <span className={'fn-r close'+(i>0&&f.closeRate<0.5?' warn':'')}>{i===m.funnel.length-1?'—':Math.round(f.closeRate*100)+'%'}</span>
+        </div>); })}</div>
+    </div>}
+
+    {/* higher-order sales analytics — the numbers a sales leader actually runs on */}
+    <div className="kgroup">Sales analytics</div>
+    <div className="an-grid">
+      <div className="an-card"><div className="an-l">Meeting &#8594; Close</div><div className="an-v">{m.metLeads?Math.round(m.meetCloseRate*100)+'%':'—'}</div><div className="an-d">{m.metAndClosed} of {m.metLeads} closed after a sales meeting{m.metNoSalesMtg>0?` · ${m.metNoSalesMtg} met, no sales meeting logged`:''}{m.metAfterCloseOnly>0?` · ${m.metAfterCloseOnly} only met after signing`:''}</div></div>
+      <div className="an-card"><div className="an-l">Show Rate</div><div className="an-v">{(m.heldAll+m.noShowAll)?Math.round(m.showRate*100)+'%':'—'}</div><div className="an-d">{m.noShowAll} no-show{m.noShowAll===1?'':'s'} all time{m.needsStatusCount>0?` · ${m.needsStatusCount} unmarked, not counted yet`:''}</div></div>
+      <div className="an-card"><div className="an-l">Avg Days to Close</div><div className="an-v">{m.avgDaysToClose==null?'—':m.avgDaysToClose+'d'}</div><div className="an-d">lead created &rarr; converted</div></div>
+      <div className="an-card"><div className="an-l">Win Rate</div><div className="an-v">{(m.wonCount+m.lostCount)?Math.round(m.winRate*100)+'%':'—'}</div><div className="an-d">of decided deals ({m.wonCount}W &middot; {m.lostCount}L)</div></div>
+      <div className={'an-card'+(m.rotting>0?' warn':'')}><div className="an-l">Pipeline Moving</div><div className="an-v">{m.openCount?Math.round(m.movingPct*100)+'%':'—'}</div><div className="an-d">{m.rotting} deal{m.rotting===1?'':'s'} cold 14+ days</div></div>
+    </div>
+    {m.sourceROI.length>0&&<div className="card" style={{marginBottom:18}}>
+      <h3>Lead source ROI</h3>
+      <div className="ch-sub">Which sources actually close — spend your time where the money is</div>
+      <div className="src-list">
+        <div className="src-row src-head"><span>Source</span><span>Leads</span><span>Closed</span><span>Rate</span><span>Value</span></div>
+        {m.sourceROI.map(s=>(<div className="src-row" key={s.source}>
+          <span className="src-name">{s.source}</span><span>{s.total}</span><span>{s.won}</span>
+          <span className={s.total>=3&&s.rate<0.15?'src-lo':s.rate>=0.4?'src-hi':''}>{Math.round(s.rate*100)}%</span>
+          <span>{s.value?usd(s.value):'—'}</span>
+        </div>))}
+      </div>
+    </div>}
+    <ChartCard title="Pipeline by Stage" sub="Open loans, by count" empty={stageData.some(d=>d.Leads>0)?null:'No open loans yet.'}>
+      <div className="chart-h"><ResponsiveContainer width="100%" height="100%"><BarChart data={stageData} margin={{top:6,right:10,left:-12,bottom:0}}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis dataKey="name" tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/><YAxis allowDecimals={false} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/>
+        <Tooltip contentStyle={tipStyle} cursor={{fill:'#F4F6FB'}}/><Bar dataKey="Leads" radius={[6,6,0,0]}>{stageData.map((e,i)=><Cell key={i} fill={e.color}/>)}</Bar>
+      </BarChart></ResponsiveContainer></div>
+    </ChartCard>
+    <div className="row r2">
+      <div className="card">
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}><div className="sec-title" style={{margin:0}}>Follow-ups Due</div>{m.overdue.length>0&&<span className="pill" style={{background:'rgba(209,67,67,.1)',color:RED}}><AlertTriangle size={11}/>{m.overdue.length} overdue</span>}</div>
+        <div style={{marginTop:12}}>{followUps.length?followUps.map(l=>(<div key={l.id} onClick={()=>open(l.id)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid #F0F0F6',cursor:'pointer'}}><div><div style={{fontWeight:600,color:INK,fontSize:14}}>{l.name}</div><div className="subcell">{l.company} · {l.nextAction}</div></div><Due iso={l.followUp}/></div>)):<div className="empty">Nothing due this week. Clean board.</div>}</div>
+      </div>
+      <div className="card">
+        <div className="sec-title" style={{margin:'0 0 12px'}}>🔥 Hot Leads</div>
+        {m.hot.length?m.hot.map(l=>(<div key={l.id} onClick={()=>open(l.id)} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid #F0F0F6',cursor:'pointer'}}><div><div style={{fontWeight:600,color:INK,fontSize:14}}>{l.name}</div><div className="subcell">{l.company}</div></div><StageBadge k={l.stage} stages={stages}/></div>)):<div className="empty">No high-priority open leads.</div>}
+      </div>
+    </div>
+  </>);
+}
+
+/* ===================== PIPELINE (cleaner kanban) ===================== */
+function Pipeline({leads,stages,open,updateLead,settings,clients,setClientPhase}){
+  const [board,setBoard]=useState('leads');
+  const [dragId,setDragId]=useState(null);const [over,setOver]=useState(null);const [expanded,setExpanded]=useState({});
+  const drop=stage=>{if(dragId)updateLead(dragId,{stage});setDragId(null);setOver(null);};
+  const move=(l,dir)=>{const i=sIdx(l.stage,stages);const j=i+dir;if(j<0||j>=stages.length)return;updateLead(l.id,{stage:stages[j].key});};
+  const openLeads=leads.filter(l=>sOf(l.stage,stages).open);
+  const totalOpen=openLeads.reduce((a,l)=>a+num(l.dealValue),0);
+  const weighted=openLeads.reduce((a,l)=>a+num(l.dealValue)*(sOf(l.stage,stages).prob||0),0);
+  const wonC=leads.filter(l=>sOf(l.stage,stages).won).length;
+  const lostC=leads.filter(l=>sOf(l.stage,stages).lost).length;
+  const winRate=(wonC+lostC)?Math.round(wonC/(wonC+lostC)*100):0;
+  const Card=({l})=>{ const i=sIdx(l.stage,stages); const st=sOf(l.stage,stages); const od=l.followUp&&daysUntil(l.followUp)<0; const stale=st.open&&daysSince(lastContact(l))>=7;
+    return (<div className={'kcard'+(od?' od':'')+(dragId===l.id?' dragging':'')} draggable onDragStart={()=>setDragId(l.id)} onDragEnd={()=>{setDragId(null);setOver(null);}} onClick={()=>open(l.id)}>
+      <div className="kcard-top">
+        <div className="kn"><span className="dot" style={{background:(PRIORITIES[l.priority]||PRIORITIES.medium).color}}/>{l.name||'(no name)'}</div>
+        {l.owner&&<span className="kown" title={l.owner}>{l.owner[0].toUpperCase()}</span>}
+      </div>
+      <div className="kco">{[l.loanPurpose,l.loanType].filter(Boolean).join(' · ')||l.company||'—'}</div>
+      {[l.loanType,l.propertyType].filter(Boolean).length>0&&<div className="ktags">{[l.loanType,l.propertyType].filter(Boolean).slice(0,2).map(s2=><span key={s2} className="tag">{s2}</span>)}</div>}
+      <div className="kmeta">
+        <span className="kvals">{l.dealValue>0&&<span className="kdv">{usd(l.dealValue)}</span>}</span>
+        {l.followUp&&<Due iso={l.followUp}/>}
+      </div>
+      {stale&&<div className="kstale"><AlertTriangle size={11}/>{daysSince(lastContact(l))}d no contact</div>}
+      <div className="kmove" onClick={e=>e.stopPropagation()}>
+        <button className="kmv" disabled={i<=0} onClick={()=>move(l,-1)} title="Move back a stage"><ChevronLeft size={16}/></button>
+        <span className="kmv-s">{st.label}</span>
+        <button className="kmv" disabled={i>=stages.length-1} onClick={()=>move(l,1)} title="Advance a stage"><ChevronRight size={16}/></button>
+      </div>
+    </div>);
+  };
+  /* Two boards over the one stage list: Leads = Prospect group; Loans = Processing→Funded.
+     A card advanced past Pre-Approved crosses into Loan Setup automatically (sIdx walks the
+     full array), so the two boards are one continuous flow — exactly the model we agreed. */
+  const leadStages=stages.filter(s=>s.group==='Prospect');
+  const loanStages=stages.filter(s=>['Processing','Closing','Funded'].includes(s.group));
+  const boardStages=board==='clients'?loanStages:leadStages;
+  const leadCount=leads.filter(l=>{const s=sOf(l.stage,stages);return s.group==='Prospect'&&s.open;}).length;
+  const loanCount=leads.filter(l=>['Processing','Closing'].includes(sOf(l.stage,stages).group)).length;
+  return (<>
+    <div className="seg" style={{marginBottom:16}}>
+      <button className={board==='leads'?'on':''} onClick={()=>setBoard('leads')}>Leads<i>{leadCount}</i></button>
+      <button className={board==='clients'?'on':''} onClick={()=>setBoard('clients')}>Loans<i>{loanCount}</i></button>
+    </div>
+    <>
+    <div className="kgrid" style={{marginBottom:18}}>
+      <Kpi variant="accent" label="Pipeline Volume" value={usd(totalOpen)} icon={<KanbanSquare size={14}/>} d={`${openLeads.length} open loan${openLeads.length===1?'':'s'}`}/>
+      <Kpi variant="green" label="Weighted Forecast" value={usd(weighted)} icon={<Target size={14}/>} d="probability-adjusted"/>
+      <Kpi label="Win Rate" value={winRate+'%'} icon={<Award size={14}/>} d={`${wonC} won · ${lostC} lost`}/>
+    </div>
+    <div className="kanban">{boardStages.map(s=>{const items=leads.filter(l=>l.stage===s.key).sort((a,b)=>num(b.dealValue)-num(a.dealValue)||(a.followUp||'9999').localeCompare(b.followUp||'9999'));const val=items.reduce((a,l)=>a+num(l.dealValue),0);const wtd=val*(s.prob||0);const isClosed=!s.open;const collapsed=isClosed&&!expanded[s.key];
+      if(collapsed){ return (<div key={s.key} className="kcol kcollapsed" title={`${s.label} — tap to expand`} onClick={()=>setExpanded(e=>({...e,[s.key]:true}))} onDragOver={e=>{e.preventDefault();setOver(s.key);}} onDragLeave={()=>setOver(c=>c===s.key?null:c)} onDrop={()=>drop(s.key)}>
+        <div className="kbar" style={{background:s.color}}/>
+        <div className="kcoll-body"><ChevronRight size={15} className="kcoll-exp"/><span className="kcoll-label">{s.label}</span><span className="kc">{items.length}</span></div>
+      </div>); }
+      return (<div key={s.key} className={'kcol '+(over===s.key?'drag':'')} onDragOver={e=>{e.preventDefault();setOver(s.key);}} onDragLeave={()=>setOver(c=>c===s.key?null:c)} onDrop={()=>drop(s.key)}>
+        <div className="kbar" style={{background:s.color}}/>
+        <div className="kcol-h"><span className="kt">{s.label}</span><span style={{display:'flex',alignItems:'center',gap:6}}><span className="kc">{items.length}</span>{isClosed&&<button className="kcoll-x" title="Collapse" onClick={e=>{e.stopPropagation();setExpanded(e2=>({...e2,[s.key]:false}));}}><ChevronLeft size={13}/></button>}</span></div>
+        <div className="kcol-v">{val>0?usd(val):'—'}{s.open&&val>0&&<span className="kwtd"> · {usd(wtd)} weighted</span>}</div>
+        <div className="kcol-body">
+          {items.map(l=><Card key={l.id} l={l}/>)}
+          {dragId&&over===s.key&&<div className="kdrop">Release to move here</div>}
+          {!items.length&&!(dragId&&over===s.key)&&<div className="kdrop">{board==='clients'?'No loans':'No leads'}</div>}
+        </div>
+      </div>);})}</div>
+    </>
+  </>);
+}
+
+/* ===================== LEADS ===================== */
+function Leads({leads,settings,stages,open,saveSettings,importLeads,me,updateLead}){
+  const [importOpen,setImportOpen]=useState(false);
+  const canAll=teamAccess(settings,me)==='all';
+  const [view,setView]=useState('mine');
+  useEffect(()=>{ if(!canAll&&view==='all') setView('mine'); },[canAll,view]);
+  const counts={mine:leads.filter(l=>l.owner===me).length,pool:leads.filter(l=>l.owner===POOL_OWNER).length,all:leads.length};
+  const claim=(e,l)=>{ e.stopPropagation(); if(updateLead) updateLead(l.id,{owner:me}); };
+  const customFields=settings.customFields||[];
+  const defs=leadColumnDefs(stages,customFields);
+  const cols=mergeLeadCols(settings.leadColumns||DEFAULT_LEAD_COLS,customFields).filter(c=>defs[c.key]);
+  const visCols=cols.filter(c=>c.visible);
+  const setCols=next=>saveSettings({...settings,leadColumns:next});
+  const moveCol=(i,d)=>{const j=i+d;if(j<0||j>=cols.length)return;const a=cols.slice();[a[i],a[j]]=[a[j],a[i]];setCols(a);};
+  const toggleCol=key=>setCols(cols.map(c=>c.key===key?{...c,visible:!c.visible}:c));
+  const [colOpen,setColOpen]=useState(false);
+  const [q,setQ]=useState('');const [stage,setStage]=useState('all');const [pri,setPri]=useState('all');const [cold,setCold]=useState('all');const [spon,setSpon]=useState('all');
+  const [sortK,setSortK]=useState('followUp');const [dir,setDir]=useState('asc');
+  const sortVal=(l,k)=>{
+    if(k==='stage') return sIdx(l.stage,stages);
+    if(k==='priority') return (PRIORITIES[l.priority]||PRIORITIES.medium).rank;
+    if(k==='dealValue') return num(l.dealValue);
+    if(k==='lastContacted') return lastContact(l);
+    if(k==='followUp') return l.followUp||'9999-99-99';
+    if(k.startsWith('cf:')) {const v=l.custom?.[k.slice(3)];return typeof v==='number'?v:(v||'').toString().toLowerCase();}
+    return (l[k]||'').toString().toLowerCase();
+  };
+  const toggleSort=k=>{ if(sortK===k) setDir(d=>d==='asc'?'desc':'asc'); else {setSortK(k);setDir('asc');} };
+  const rows=useMemo(()=>{
+    let r=scopeLeads(leads,view,me).filter(l=>{
+      if(stage!=='all'&&l.stage!==stage)return false;
+      if(pri!=='all'&&l.priority!==pri)return false;
+      if(cold!=='all'&&daysSince(lastContact(l))<+cold)return false;
+      if(spon!=='all'&&(l.loanPurpose||'')!==spon)return false;
+      if(q){const s=(l.name+' '+(l.company||'')+' '+(l.loanType||'')+' '+(l.loanPurpose||'')+' '+l.phone+' '+(l.email||'')+' '+l.source).toLowerCase();if(!s.includes(q.toLowerCase()))return false;}
+      return true;
+    });
+    r.sort((a,b)=>{const av=sortVal(a,sortK),bv=sortVal(b,sortK);const c=av<bv?-1:av>bv?1:0;return dir==='asc'?c:-c;});
+    return r;
+  },[leads,q,stage,pri,cold,spon,sortK,dir,stages,view,me]);
+  const csv=()=>{
+    const cols=['name','company','phone','email','stage','priority','source','loanPurpose','loanType','propertyType','dealValue','commPct','commFlat','rate','termYears','targetClose','preApprovalStart','preApprovalExp','rateLockExp','nextAction','nextSteps','followUp','owner'];
+    const esc=v=>{v=Array.isArray(v)?v.join('; '):(v??'');v=String(v).replace(/"/g,'""');return /[",\n]/.test(v)?`"${v}"`:v;};
+    const head=cols.join(',');const body=rows.map(l=>cols.map(c=>esc(c==='stage'?sOf(l.stage,stages).label:l[c])).join(',')).join('\n');
+    const blob=new Blob([head+'\n'+body],{type:'text/csv'});const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download='proytech-leads.csv';a.click();URL.revokeObjectURL(u);
+  };
+  const Th=({k,children})=>(<th className={sortK===k?'sorted':''} onClick={()=>toggleSort(k)}>{children}<span className="ar">{sortK===k?(dir==='asc'?'▲':'▼'):'↕'}</span></th>);
+  return (<>
+    <div className="toolbar">
+      <ScopeSeg view={view} setView={setView} counts={counts} canAll={canAll}/>
+      <div className="searchbox"><Search size={16} color="#928DAD"/><input placeholder="Search name, phone, email, loan type…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <select className="selctl" value={stage} onChange={e=>setStage(e.target.value)}><option value="all">All stages</option>{stages.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}</select>
+      <select className="selctl" value={pri} onChange={e=>setPri(e.target.value)}><option value="all">All priority</option>{Object.entries(PRIORITIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select>
+      <select className="selctl" value={cold} onChange={e=>setCold(e.target.value)}><option value="all">Any contact age</option><option value="7">Cold · 7+ days</option><option value="14">Cold · 14+ days</option><option value="30">Cold · 30+ days</option></select>
+      <select className="selctl" value={spon} onChange={e=>setSpon(e.target.value)}><option value="all">All purposes</option>{LOAN_PURPOSES.map(p=><option key={p} value={p}>{p}</option>)}</select>
+      <button className="selctl" onClick={()=>setDir(d=>d==='asc'?'desc':'asc')} title="Toggle direction"><ArrowUpDown size={15}/></button>
+      <div className="colmenu-wrap">
+        <button className="selctl" onClick={()=>setColOpen(o=>!o)}><SlidersHorizontal size={15}/>Columns</button>
+        {colOpen&&<><div className="cm-back" onClick={()=>setColOpen(false)}/><div className="colmenu">
+          <div className="cm-row"><span className="cm-name" style={{fontWeight:600,color:INK}}>Name</span><span className="cm-lock">always on</span></div>
+          {cols.map((c,i)=>(<div className="cm-row" key={c.key}><input type="checkbox" checked={c.visible} onChange={()=>toggleCol(c.key)}/><span className="cm-name">{defs[c.key]?.label||c.key}</span><button className="iconbtn" style={{width:24,height:24}} onClick={()=>moveCol(i,-1)} disabled={i===0}><ChevronUp size={13}/></button><button className="iconbtn" style={{width:24,height:24}} onClick={()=>moveCol(i,1)} disabled={i===cols.length-1}><ChevronDown size={13}/></button></div>))}
+        </div></>}
+      </div>
+      <button className="btn btn-g" onClick={csv}><Download size={15}/>CSV</button>
+      {importLeads&&<button className="btn btn-p" onClick={()=>setImportOpen(true)}><Upload size={15}/>Import</button>}
+    </div>
+    {view==='pool'&&<div className="pool-note"><Users size={14}/>Unclaimed leads in the shared pool. Claim one and it moves to your list.</div>}
+    <div className="tbl-wrap"><table className="tbl"><thead><tr>
+      <Th k="name">Name</Th>{visCols.map(c=><Th key={c.key} k={c.key}>{defs[c.key].label}</Th>)}{view==='pool'&&<th></th>}
+    </tr></thead><tbody>{rows.map(l=>(<tr key={l.id} onClick={()=>open(l.id,rows.map(r=>r.id))}>
+      <td><div className="namecell">{l.name}</div><div className="subcell">{l.company}</div></td>
+      {visCols.map(c=><td key={c.key}>{defs[c.key].render(l)}</td>)}
+      {view==='pool'&&<td style={{textAlign:'right'}}><button className="claim-btn" onClick={e=>claim(e,l)}><UserCheck size={13}/>Claim</button></td>}
+    </tr>))}</tbody></table>{!rows.length&&<div className="empty">{view==='mine'?<>No leads assigned to you{q||stage!=='all'?' match those filters':''}. Check the <b>Pool</b> for unclaimed leads{canAll?<> or switch to <b>All</b></>:''}.</>:view==='pool'?'The pool is empty — every lead is claimed.':'No leads match. Adjust filters or add a new lead.'}</div>}</div>
+    {importOpen&&<ImportModal onClose={()=>setImportOpen(false)} onImport={arr=>{importLeads(arr);setImportOpen(false);}}/>}
+  </>);
+}
+
+/* ===================== CSV IMPORT ===================== */
+const IMPORT_FIELDS=[['ignore','— ignore —'],['name','Name'],['company','Co-borrower'],['phone','Phone'],['email','Email'],['loanPurpose','Loan purpose'],['loanType','Loan type'],['source','Source'],['note','Notes']];
+const IMPORT_KEYS=IMPORT_FIELDS.map(f=>f[0]);
+const guessField=h=>{const s=(h||'').toLowerCase();
+  if(/e-?mail/.test(s))return 'email';
+  if(/phone|mobile|cell|tel|number/.test(s))return 'phone';
+  if(/co-?borrower|spouse|joint/.test(s))return 'company';
+  if(/first|last|full|contact|name|borrower/.test(s))return 'name';
+  if(/purpose|purchase|refi/.test(s))return 'loanPurpose';
+  if(/loan\s*type|program|product/.test(s))return 'loanType';
+  if(/source|origin|referr|lead\s*from/.test(s))return 'source';
+  if(/note|comment|desc|remark/.test(s))return 'note';
+  return 'ignore';};
+const parseCSV=text=>{const rows=[];let row=[],cur='',q=false;
+  for(let i=0;i<text.length;i++){const c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else { if(c==='"')q=true; else if(c===','){row.push(cur);cur='';} else if(c==='\n'){row.push(cur);rows.push(row);row=[];cur='';} else if(c!=='\r')cur+=c; } }
+  if(cur!==''||row.length){row.push(cur);rows.push(row);}
+  return rows.filter(r=>r.some(c=>(c||'').trim()!==''));};
+
+function ImportModal({onClose,onImport}){
+  const [headers,setHeaders]=useState(null);
+  const [rows,setRows]=useState([]);
+  const [mapping,setMapping]=useState({});
+  const [ai,setAi]=useState(null);
+  const [fileName,setFileName]=useState('');
+  const fileRef=React.useRef(null);
+  const ingest=text=>{ const parsed=parseCSV(text); if(parsed.length<2){window.alert('That file needs a header row and at least one data row.');return;}
+    const hd=parsed[0].map(h=>(h||'').trim()); const rw=parsed.slice(1);
+    setHeaders(hd); setRows(rw);
+    const base={}; hd.forEach(h=>base[h]=guessField(h)); setMapping(base);
+    setAi('reading');
+    (async()=>{ try{ const r=await fetch('/api/import-leads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({headers:hd,samples:rw.slice(0,6)})}); const j=await r.json();
+      if(j&&j.ok&&j.mapping){ const m={}; hd.forEach(h=>{const v=j.mapping[h];m[h]=(v&&IMPORT_KEYS.includes(v))?v:base[h];}); setMapping(m); setAi('done'); }
+      else setAi('heuristic'); }catch(e){ setAi('heuristic'); } })();
+  };
+  const onFile=e=>{ const f=e.target.files?.[0]; e.target.value=''; if(!f)return; setFileName(f.name); const r=new FileReader(); r.onload=()=>ingest(String(r.result)); r.readAsText(f); };
+  const buildLead=row=>{ const f={}; headers.forEach((h,i)=>{ const t=mapping[h]; if(!t||t==='ignore')return; const v=(row[i]||'').trim(); if(!v)return; if(t==='name')f.name=(f.name?f.name+' ':'')+v; else if(t==='note')f.note=(f.note?f.note+' | ':'')+v; else f[t]=v; });
+    if(!f.name)f.name=f.company||'(no name)'; if(!f.source)f.source='CSV import'; return mkLead(f); };
+  const preview=headers?rows.slice(0,6).map(buildLead):[];
+  const mapped=k=>headers?headers.filter(h=>mapping[h]===k).length:0;
+  const doImport=()=>{ const built=rows.map(buildLead); onImport(built); };
+  return (<div className="scrim2" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal" style={{maxWidth:720}} onMouseDown={e=>e.stopPropagation()}>
+      <div className="m-head"><div><h2>Import leads from CSV</h2><div className="meta">AI maps your columns — you review, then import</div></div><button className="m-x" onClick={onClose}><X size={18}/></button></div>
+      <div style={{padding:'4px 22px 22px'}}>
+        {!headers?(<>
+          <div className="drop" onClick={()=>fileRef.current?.click()}><Upload size={22}/><div style={{marginTop:8,fontWeight:600,color:INK}}>Choose a .csv file</div><div style={{fontSize:12,color:'#8b88a0',marginTop:3}}>Export your Google Sheet as CSV, or drag any contact list. Messy columns are fine — the AI sorts them out.</div></div>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:'none'}} onChange={onFile}/>
+          <div style={{textAlign:'center',color:'#c7c5d4',fontSize:12,margin:'12px 0 6px'}}>or paste rows below</div>
+          <textarea rows={5} placeholder="Name,Company,Phone,Email&#10;Jane Doe,Acme,3165551234,jane@acme.com" style={{width:'100%',border:'1px solid #E1E2EC',borderRadius:10,padding:10,fontSize:12.5,fontFamily:'monospace'}} onBlur={e=>{if(e.target.value.trim())ingest(e.target.value);}}/>
+        </>):(<>
+          {ai==='reading'&&<div className="ai-banner ai-reading"><Loader2 size={15} className="spin"/>AI is reading your columns…</div>}
+          {ai==='done'&&<div className="ai-banner ai-done"><Sparkles size={15}/>AI mapped your columns — check them below and fix any that look off.</div>}
+          {ai==='heuristic'&&<div className="ai-banner ai-off"><AlertTriangle size={15}/>Auto-matched columns by name (AI unavailable). Double-check the mapping below.</div>}
+          <div className="imp-sub">{rows.length} row{rows.length===1?'':'s'} found{fileName?' · '+fileName:''}. Map each column:</div>
+          <div className="imp-map">{headers.map(h=>(<div className="imp-row" key={h}><span className="imp-h" title={h}>{h||'(blank)'}</span><ChevronRight size={13} color="#c7c5d4"/><select value={mapping[h]||'ignore'} onChange={e=>setMapping(m=>({...m,[h]:e.target.value}))}>{IMPORT_FIELDS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>))}</div>
+          {!mapped('name')&&<div className="imp-warn"><AlertTriangle size={13}/>No column is mapped to <b>Name</b> — those rows will fall back to the co-borrower name.</div>}
+          <div className="imp-sub" style={{marginTop:16}}>Preview (first {preview.length}):</div>
+          <div className="tbl-wrap" style={{maxHeight:200,overflow:'auto'}}><table className="tbl"><thead><tr><th>Name</th><th>Company</th><th>Phone</th><th>Email</th></tr></thead><tbody>{preview.map((l,i)=>(<tr key={i}><td className="namecell">{l.name}</td><td className="subcell">{l.company||'—'}</td><td className="subcell">{l.phone||'—'}</td><td className="subcell">{l.email||'—'}</td></tr>))}</tbody></table></div>
+          <div style={{display:'flex',gap:8,marginTop:16,alignItems:'center'}}>
+            <button className="btn btn-p" onClick={doImport}><CheckCircle2 size={15}/>Import {rows.length} lead{rows.length===1?'':'s'}</button>
+            <button className="btn btn-s btn-sm" onClick={()=>{setHeaders(null);setRows([]);setAi(null);setFileName('');}}>Start over</button>
+          </div>
+        </>)}
+      </div>
+    </div>
+  </div>);
+}
+
+/* ===================== INTRO WEB ===================== */
+function NetworkWeb({contacts,open}){
+  const [sel,setSel]=useState(null);
+  const [fs,setFs]=useState(false);
+  useEffect(()=>{ if(!fs)return; const h=e=>{if(e.key==='Escape')setFs(false);}; window.addEventListener('keydown',h); return ()=>window.removeEventListener('keydown',h); },[fs]);
+  const net=useMemo(()=>buildNetwork(contacts),[contacts]);
+  const COL=196,ROW=52,NW=164,NH=36,PAD=22;
+  if(!net.nodes.length) return (<div className="card"><div className="empty">No introductions mapped yet. Open any contact, set <b>Introduced by</b>, and the web will draw itself here.</div></div>);
+  const rootYs=net.nodes.filter(n=>n.depth===1).map(n=>n.y);
+  const youY=rootYs.length?(Math.min(...rootYs)+Math.max(...rootYs))/2:0;
+  const X=d=>PAD+d*COL, Y=y=>PAD+y*ROW+NH/2;
+  const W=X(net.maxDepth)+NW+PAD, H=PAD*2+Math.max(net.rows,1)*ROW;
+  const ancestors=id=>{const c=net.byId[id];return c?introChain(c,contacts).map(p=>p.id):[];};
+  const selPath=sel?[...ancestors(sel),sel]:[];
+  const onPath=id=>selPath.includes(id);
+  const linkOn=(a,b)=>{const i=selPath.indexOf(a);return i>=0&&selPath[i+1]===b;};
+  const curve=(x1,y1,x2,y2)=>{const mx=(x1+x2)/2;return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;};
+  const colorOf=c=>c.isRelationship?'#7A5CC8':(c.isClient?GREEN:COBALT);
+  const inner=(<>
+        {net.roots.length>0&&<>
+          <rect x={X(0)} y={Y(youY)-NH/2} width={NW} height={NH} rx={9} className="web-you"/>
+          <text x={X(0)+NW/2} y={Y(youY)+4} textAnchor="middle" className="web-youtxt">You · ProyTech</text>
+          {net.nodes.filter(n=>n.depth===1).map(n=>(
+            <path key={'y'+n.id} d={curve(X(0)+NW,Y(youY),X(1),Y(n.y))} className="web-link you"/>
+          ))}
+        </>}
+        {net.links.map(([a,b])=>{
+          const na=net.nodes.find(n=>n.id===a),nb=net.nodes.find(n=>n.id===b);
+          if(!na||!nb)return null;
+          return <path key={a+'>'+b} d={curve(X(na.depth)+NW,Y(na.y),X(nb.depth),Y(nb.y))} className={'web-link'+(linkOn(a,b)?' on':'')}/>;
+        })}
+        {net.nodes.map(n=>{const c=net.byId[n.id];if(!c)return null;
+          const dim=sel&&!onPath(n.id);
+          return (<g key={n.id} className={'web-node'+(dim?' dim':'')+(sel===n.id?' sel':'')} onClick={()=>setSel(n.id)} onDoubleClick={()=>open&&open(n.id)}>
+            <rect x={X(n.depth)} y={Y(n.y)-NH/2} width={NW} height={NH} rx={9} fill="#fff" stroke={onPath(n.id)?colorOf(c):'#E1E2EC'} strokeWidth={onPath(n.id)?2:1}/>
+            <rect x={X(n.depth)} y={Y(n.y)-NH/2} width={4} height={NH} rx={2} fill={colorOf(c)}/>
+            <text x={X(n.depth)+12} y={Y(n.y)-1} className="web-name">{(c.name||'').slice(0,20)}</text>
+            <text x={X(n.depth)+12} y={Y(n.y)+11} className="web-co">{(c.company||'').slice(0,22)}</text>
+            {n.kids>0&&<><circle cx={X(n.depth)+NW-14} cy={Y(n.y)} r={9} fill="#F1F2F8"/><text x={X(n.depth)+NW-14} y={Y(n.y)+3.5} textAnchor="middle" className="web-kids">{n.kids}</text></>}
+          </g>);
+        })}
+  </>);
+  const svgEl=fit=>fit
+    ? <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" className="web-svg" style={{width:'100%',height:'100%',display:'block'}}>{inner}</svg>
+    : <svg width={W} height={H} className="web-svg">{inner}</svg>;
+  const legendEl=full=>(<div className="web-legend">
+    <span><i style={{background:'#7A5CC8'}}/>Relationship</span>
+    <span><i style={{background:COBALT}}/>Lead</span>
+    <span><i style={{background:GREEN}}/>Client</span>
+    <span className="web-tip">Tap a name to trace it back · double-tap to open</span>
+    <div className="web-actions">
+      {sel&&<button className="btn btn-s btn-sm" onClick={()=>setSel(null)}>Clear trace</button>}
+      {full?<button className="btn btn-s btn-sm" onClick={()=>setFs(false)}><X size={14}/>Exit</button>
+           :<button className="btn btn-s btn-sm" onClick={()=>setFs(true)}><Expand size={14}/>Full screen</button>}
+    </div>
+  </div>);
+  const traceEl=sel?(()=>{const chain=[...ancestors(sel).map(id=>net.byId[id]),net.byId[sel]].filter(Boolean);
+    return (<div className="web-trace"><b>{chain[chain.length-1].name}</b>{chain.length>1?<> traces back through {chain.slice(0,-1).map((p,i)=><React.Fragment key={p.id}>{i>0&&' → '}<span onClick={()=>setSel(p.id)}>{p.name}</span></React.Fragment>)}</>:<> — you met them directly</>}</div>);})():null;
+  return (<>
+    <div className="card web-card">
+      {legendEl(false)}
+      {traceEl}
+      <div className="web-scroll">{svgEl(false)}</div>
+    </div>
+    {fs&&<div className="web-fs">
+      {legendEl(true)}
+      {traceEl}
+      <div className="web-fs-stage">{svgEl(true)}</div>
+    </div>}
+  </>);
+}
+
+/* ===================== RELATIONSHIPS ===================== */
+const REL_TIERS=[['champion','Champions','#C8A24A'],['b','B Tier','#2B4DE0'],['new','New Relationships','#1F9D55']];
+const REL_TIER_DESC={champion:'Your top referrers & hubs',b:'Warm — keep nurturing',new:'Just met — start farming'};
+const tierOf=r=>r.relTier||'new';
+const tierMeta=k=>REL_TIERS.find(t=>t[0]===k)||REL_TIERS[2];
+function Relationships({leads,open,updateLead}){
+  const [q,setQ]=useState('');
+  const [src,setSrc]=useState('all');
+  const [tier,setTier]=useState(null);
+  const [view,setView]=useState('grouped');
+  const rels=useMemo(()=>leads.filter(l=>l.isRelationship),[leads]);
+  const nameOf=id=>{const x=leads.find(l=>l.id===id);return x?x.name:'';};
+  const tierCount=k=>rels.filter(r=>tierOf(r)===k).length;
+  const sources=useMemo(()=>{
+    const m={};
+    rels.forEach(r=>{const k=r.introducedBy||'';m[k]=(m[k]||0)+1;});
+    return Object.entries(m).map(([id,count])=>({id,count,name:id?nameOf(id)||'(removed contact)':'Direct / no intro'}))
+      .sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
+  },[rels,leads]);
+  const shown=useMemo(()=>rels.filter(r=>{
+    if(tier&&tierOf(r)!==tier)return false;
+    if(src!=='all'&&(r.introducedBy||'')!==src)return false;
+    if(q){const s=(r.name+' '+r.company+' '+(r.relNote||'')+' '+nameOf(r.introducedBy)).toLowerCase();if(!s.includes(q.toLowerCase()))return false;}
+    return true;
+  }).sort((a,b)=>(a.name||'').localeCompare(b.name||'')),[rels,q,src,tier,leads]);
+  const groups=useMemo(()=>{
+    const m={};
+    shown.forEach(r=>{const k=r.introducedBy||'';(m[k]=m[k]||[]).push(r);});
+    return Object.entries(m).map(([id,list])=>({id,name:id?nameOf(id)||'(removed contact)':'Direct / no intro',list}))
+      .sort((a,b)=>b.list.length-a.list.length||a.name.localeCompare(b.name));
+  },[shown,leads]);
+  const topConnector=sources.filter(s=>s.id)[0];
+  const allIntro=useMemo(()=>{
+    const m={};
+    leads.forEach(l=>{ if(l.introducedBy&&l.introducedBy!==l.id&&leads.some(x=>x.id===l.introducedBy)) m[l.introducedBy]=(m[l.introducedBy]||0)+1; });
+    return Object.entries(m).map(([id,count])=>({id,count,name:nameOf(id)})).sort((a,b)=>b.count-a.count);
+  },[leads]);
+  const topAll=allIntro[0];
+  const deepest=useMemo(()=>{
+    let best=0,who=null;
+    leads.forEach(l=>{const c=introChain(l,leads);if(c.length>best){best=c.length;who=l;}});
+    return {len:best,who};
+  },[leads]);
+  const TierPick=({r})=>{const m=tierMeta(tierOf(r));return (<span className="tier-pick" style={{'--tc':m[2]}} onClick={e=>e.stopPropagation()}>
+    <span className="tier-dot"/>
+    <select value={tierOf(r)} onChange={e=>updateLead&&updateLead(r.id,{relTier:e.target.value})}>{REL_TIERS.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select>
+  </span>);};
+  const Row=r=>(<tr key={r.id} onClick={()=>open(r.id,shown.map(x=>x.id))}>
+    <td><div className="namecell">{r.name}</div><div className="subcell">{r.company||'—'}</div></td>
+    <td onClick={e=>e.stopPropagation()}><TierPick r={r}/></td>
+    <td className="subcell">{r.relNote||'—'}</td>
+    <td>{r.introducedBy?<span className="rel-chip"><Link2 size={11}/>{nameOf(r.introducedBy)||'—'}</span>:<span className="subcell">Direct</span>}</td>
+    <td><Due iso={r.followUp}/></td>
+    <td className="subcell">{r.owner||'—'}</td>
+  </tr>);
+  return (<>
+    <div className="rel-tiers">
+      {REL_TIERS.map(([key,label,color])=>{const people=rels.filter(r=>tierOf(r)===key).sort((a,b)=>(a.name||'').localeCompare(b.name||''));const on=tier===key;
+        const pick=()=>{ if(on){setTier(null);} else {setTier(key);setView('list');} };
+        return (<div key={key} className={'rel-tier'+(on?' on':'')} style={{'--tc':color}}>
+          <div className="rt-head" onClick={pick}>
+            <div className="rt-top"><span className="rt-dot"/>{label}<span className="rt-count">{people.length}</span></div>
+            <div className="rt-d">{REL_TIER_DESC[key]}</div>
+          </div>
+          <div className="rt-people">
+            {people.length?people.map(r=>(<div key={r.id} className="rt-person" onClick={()=>open(r.id)}>
+              <span className="rt-pn">{r.name||'(no name)'}</span>{r.company?<span className="rt-pc">{r.company}</span>:null}
+            </div>)):<div className="rt-empty">No one here yet</div>}
+          </div>
+          <div className="rt-foot" onClick={pick}>{on?'Listed below · tap to clear':`Tap to list all ${people.length}`}</div>
+        </div>);})}
+    </div>
+    <div className="rel-netline">
+      <span>{allIntro.length} connectors</span><span>·</span>
+      <span>top: {topAll?`${topAll.name} (${topAll.count})`:'—'}</span><span>·</span>
+      <span>longest chain {deepest.len?deepest.len+1:0}</span>
+      {tier&&<button className="rel-clearf" onClick={()=>setTier(null)}>Showing {tierMeta(tier)[1]} · clear</button>}
+    </div>
+    <div className="toolbar">
+      <div className="searchbox"><Search size={16} color="#928DAD"/><input placeholder="Search name, company, how you know them…" value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <select className="selctl" value={src} onChange={e=>setSrc(e.target.value)}>
+        <option value="all">Everyone who introduced</option>
+        {sources.map(s=><option key={s.id} value={s.id}>{s.name} ({s.count})</option>)}
+      </select>
+      <div className="seg" style={{marginLeft:'auto'}}>
+        <button className={view==='grouped'?'on':''} onClick={()=>setView('grouped')}>Grouped</button>
+        <button className={view==='list'?'on':''} onClick={()=>setView('list')}>List</button>
+        <button className={view==='web'?'on':''} onClick={()=>setView('web')}>Web</button>
+      </div>
+    </div>
+    {view==='web'?<NetworkWeb contacts={leads} open={open}/>
+    :!rels.length?<div className="card"><div className="empty">No relationships yet. Open any contact and flip the <b>Relationship</b> toggle at the top to move them here.</div></div>
+    :!shown.length?<div className="card"><div className="empty">No relationships in {tier?tierMeta(tier)[1]:'this view'}{q?' matching that search':''}.</div></div>
+    :view==='list'?<div className="tbl-wrap"><table className="tbl"><thead><tr><th>Name</th><th>Tier</th><th>How you know them</th><th>Introduced by</th><th>Follow-up</th><th>Owner</th></tr></thead><tbody>{shown.map(Row)}</tbody></table></div>
+    :<>{groups.map(g=>(<div className="card" style={{marginBottom:14}} key={g.id||'direct'}>
+        <div className="rel-ghead">
+          {g.id?<><span className="rel-gname" onClick={()=>open(g.id)}><Link2 size={13}/>{g.name}</span><span className="rel-gcount">{g.list.length} {g.list.length===1?'intro':'intros'}</span></>
+              :<><span className="rel-gname plain"><Users size={13}/>Direct / no intro</span><span className="rel-gcount">{g.list.length}</span></>}
+        </div>
+        <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Name</th><th>Tier</th><th>How you know them</th><th>Introduced by</th><th>Follow-up</th><th>Owner</th></tr></thead><tbody>{g.list.map(Row)}</tbody></table></div>
+      </div>))}</>}
+  </>);
+}
+
+/* ===================== CLIENTS ===================== */
+function ClientRoadmap({clients,tracks,open}){
+  if(!clients.length) return null;
+  const PHASES=[['Not Started',p=>p<=0],['Kickoff',p=>p>0&&p<.26],['In Progress',p=>p>=.26&&p<.6],['Review',p=>p>=.6&&p<1]];
+  const wp=clients.map(l=>({l,o:clientOverall(l,tracks)}));
+  return (<div className="card" style={{marginBottom:18}}>
+    <div className="sec-title" style={{margin:'0 0 14px'}}><Rocket size={15}/>Delivery Roadmap</div>
+    <div className="rmap-board">{PHASES.map(([label,test])=>{const items=wp.filter(x=>test(x.o.pct));return (
+      <div className="rmap-col" key={label}>
+        <div className="rmap-colh">{label}<span>{items.length}</span></div>
+        {items.map(({l,o})=>(<div className="rmap-card" key={l.id} onClick={()=>open(l.id)}>
+          <div className="rc-n">{l.name||l.company}</div>
+          <div className="pbar" style={{margin:'7px 0 0'}}><div style={{width:Math.round(o.pct*100)+'%'}}/></div>
+          <div className="rc-ph">{o.phase}</div>
+        </div>))}
+        {!items.length&&<div className="rmap-empty">—</div>}
+      </div>);})}
+    </div>
+    <div className="rmap-rows">{wp.map(({l,o})=>(<div className="rmap-row" key={l.id} onClick={()=>open(l.id)}>
+      <div className="rr-name"><div className="namecell">{l.name||l.company}</div><div className="subcell">{Math.round(o.pct*100)}% · {o.phase}{o.overdue>0?<span className="od-tag"> · {o.overdue} overdue</span>:o.nextDue?<span className="due-tag"> · next due {fmtDate(o.nextDue)}</span>:''}</div></div>
+      <div className="rr-tracks">{o.tracks.map(tr=>{const p=trackProgress(l,tr);return (
+        <div className="rr-track" key={tr.key}><span className="rr-tl">{tr.label}</span><div className="rr-dots">{p.ms.map(m=>{const e=p.entries[m];const done=!!e.done;const od=!done&&e.due&&daysUntil(e.due)<0;return <span key={m} className={'rdot'+(done?' on':'')+(od?' over':'')} title={m+(done?' ✓ '+fmtDate(e.done):e.due?(od?' overdue '+fmtDate(e.due):' due '+fmtDate(e.due)):' (no date)')}/>;})}</div></div>);})}
+      </div>
+    </div>))}</div>
+  </div>);
+}
+
+/* shared client kanban — used in the Clients tab and the Pipeline toggle */
+function ClientBoard({clients,settings,onCard,setClientPhase}){
+  const [dragId,setDragId]=useState(null);const [over,setOver]=useState(null);
+  const cols=boardCols(clients,settings);
+  const drop=col=>{ if(!dragId){setOver(null);return;} if(!(col.custom&&col.ownerId&&col.ownerId!==dragId)) setClientPhase(dragId,col.key); setDragId(null);setOver(null); };
+  const step=(l,dir)=>{ const order=flowOrder(settings,l); const i=order.indexOf(l.clientPhase||'intake'); const j=i+dir; if(i<0){ if(dir>0)setClientPhase(l.id,order[0]); return;} if(j<0||j>=order.length)return; setClientPhase(l.id,order[j]); };
+  const items=onbItemsOf(settings);
+  const Card=({l})=>{ const st=onboardingStat(l,items); const order=flowOrder(settings,l); const i=order.indexOf(l.clientPhase||'intake');
+    return (<div className={'kcard'+(st.overdue>0?' od':'')+(dragId===l.id?' dragging':'')} draggable onDragStart={()=>setDragId(l.id)} onDragEnd={()=>{setDragId(null);setOver(null);}} onClick={()=>onCard&&onCard(l.id)}>
+      <div className="kcard-top"><div className="kn"><span className="dot" style={{background:phaseInfo(l.clientPhase||'intake',settings,l).color}}/>{l.name||l.company}</div>{l.owner&&<span className="kown">{l.owner[0].toUpperCase()}</span>}</div>
+      <div className="kco">{l.name}</div>
+      <div className="kmeta"><span className="kvals">{l.retainerActive&&num(l.retainer)>0&&<span className="kmrr">{usd(l.retainer)}/mo</span>}</span>{st.overdue>0?<span className="badge over" style={{padding:'1px 7px'}}>{st.overdue} overdue</span>:st.next?<span className="subcell" style={{fontSize:11}}>next: {st.next.label.slice(0,22)}</span>:<span className="badge done" style={{padding:'1px 7px'}}>done</span>}</div>
+      <div className="kmove" onClick={e=>e.stopPropagation()}>
+        <button className="kmv" disabled={i<=0} onClick={()=>step(l,-1)} title="Back a phase"><ChevronLeft size={16}/></button>
+        <span className="kmv-s">{phaseInfo(l.clientPhase||'intake',settings,l).label}</span>
+        <button className="kmv" disabled={i>=0&&i>=order.length-1} onClick={()=>step(l,1)} title="Advance a phase"><ChevronRight size={16}/></button>
+      </div>
+    </div>);
+  };
+  return (<div className="kanban">{cols.map(col=>{ const colItems=clients.filter(l=>(l.clientPhase||'intake')===col.key); const mrr=colItems.reduce((a,l)=>a+(l.retainerActive?num(l.retainer):0),0); const od=colItems.reduce((a,l)=>a+onboardingStat(l,items).overdue,0);
+    return (<div key={col.key} className={'kcol '+(over===col.key?'drag':'')} onDragOver={e=>{e.preventDefault();setOver(col.key);}} onDragLeave={()=>setOver(c=>c===col.key?null:c)} onDrop={()=>drop(col)}>
+      <div className="kbar" style={{background:col.color}}/>
+      <div className="kcol-h"><span className="kt">{col.label}{col.custom&&<span className="cp-tag">custom</span>}</span><span className="kc">{colItems.length}</span></div>
+      <div className="kcol-v">{mrr>0?usd(mrr)+'/mo':'—'}{od>0&&<span className="kwtd" style={{color:RED}}> · {od} overdue</span>}</div>
+      <div className="kcol-body">
+        {colItems.map(l=><Card key={l.id} l={l}/>)}
+        {dragId&&over===col.key&&<div className="kdrop">Release to move here</div>}
+        {!colItems.length&&!(dragId&&over===col.key)&&<div className="kdrop">{col.custom?'custom phase':'No clients'}</div>}
+      </div>
+    </div>);})}</div>);
+}
+
+function Clients({leads,stages,settings,open,toggleOnboarding,setOnboardingDue,setClientPhase,addCustomPhase,removeCustomPhase}){
+  const tracks=settings.deliveryTracks||DEFAULT_DELIVERY_TRACKS;
+  const onbItems=onbItemsOf(settings);
+  const [showChurned,setShowChurned]=useState(false);
+  const [expand,setExpand]=useState(null);
+  const t=todayISO();
+  const clients=leads.filter(l=>l.isClient);
+  const wonNotConverted=leads.filter(l=>sOf(l.stage,stages).won&&!l.isClient);
+  const terminals=terminalPhaseKeys(settings);
+  const visible=clients.filter(l=>showChurned?true:!terminals.has(l.clientPhase||''));
+  /* daily "what needs doing": overdue first, then earliest next-due */
+  const ranked=visible.map(l=>({l,st:onboardingStat(l,onbItems),phase:l.clientPhase||'intake'}))
+    .sort((a,b)=>{ if((b.st.overdue>0)-(a.st.overdue>0))return (b.st.overdue>0)-(a.st.overdue>0);
+      const ad=a.st.nextDue||'9999',bd=b.st.nextDue||'9999'; return ad.localeCompare(bd); });
+  const byPhase=k=>clients.filter(l=>(l.clientPhase||'intake')===k).length;
+  const retainerClients=clients.filter(l=>l.retainerActive); const mrr=retainerClients.reduce((a,l)=>a+num(l.retainer),0);
+  const totalOverdue=clients.reduce((a,l)=>a+onboardingStat(l,onbItems).overdue,0);
+  const advance=l=>{ const order=flowOrder(settings,l); const cur=l.clientPhase||'intake'; const i=order.indexOf(cur); if(i<0||i>=order.length-1)return; const nextKey=order[i+1];
+    const isStd=stdPhases(settings).some(p=>p.key===cur&&p.flow); const pp=isStd?phaseProgress(l,cur,onbItems):{total:0,done:0}; const left=pp.total-pp.done;
+    if(left>0 && !window.confirm(`${left} item${left>1?'s':''} still unchecked in ${phaseInfo(cur,settings,l).label} — advance to ${phaseInfo(nextKey,settings,l).label} anyway?`)) return;
+    setClientPhase(l.id,nextKey); };
+  const PhaseBadge=({k,client})=>{const m=phaseInfo(k,settings,client);return <span className="phase-badge" style={{background:m.color+'1A',color:m.color}}><span className="dot" style={{background:m.color}}/>{m.label}</span>;};
+  const sel=visible.find(l=>l.id===expand);
+  return (<>
+    <div className="kgrid">
+      <Kpi variant="accent" label="Active Loans" value={visible.length} icon={<Building2 size={14}/>} d={`${byPhase('processing')} processing · ${byPhase('underwriting')} UW · ${byPhase('cleartoclose')} CTC`}/>
+      <Kpi variant="green" label="Loan Volume" value={usd(visible.reduce((a,l)=>a+num(l.dealValue),0))} icon={<DollarSign size={14}/>} d={`${visible.length} file${visible.length===1?'':'s'} in process`}/>
+      <Kpi label="Overdue items" value={totalOverdue} icon={<AlertTriangle size={14}/>} d="across all loan files"/>
+      <Kpi label="Stalled / withdrawn" value={byPhase('stalled')+byPhase('withdrawn')} icon={<Flag size={14}/>} d={`${byPhase('closed')} closed`}/>
+    </div>
+    {wonNotConverted.length>0&&<div className="note" style={{marginBottom:18}}><b>{wonNotConverted.length} funded {wonNotConverted.length===1?'loan is':'loans are'} not in processing yet.</b> Open {wonNotConverted.length===1?'it':'them'} and hit <b>Start loan file</b>: {wonNotConverted.slice(0,5).map(l=>l.name||l.company).join(', ')}{wonNotConverted.length>5?'…':''}</div>}
+    <div className="toolbar" style={{marginBottom:14}}>
+      <div className="sec-title" style={{margin:0}}><KanbanSquare size={15}/>Loan Pipeline</div>
+      <label className="chip-toggle" style={{marginLeft:'auto'}}><input type="checkbox" checked={showChurned} onChange={e=>setShowChurned(e.target.checked)}/>Show closed/withdrawn</label>
+    </div>
+    {!visible.length?<div className="empty">No loans in process yet. Move a lead to <b>Funded</b> (or hit Start loan file) to begin processing.</div>
+    :<><ClientBoard clients={visible} settings={settings} setClientPhase={setClientPhase} onCard={id=>setExpand(id===expand?null:id)}/>
+      {sel?(()=>{ const l=sel; const phase=l.clientPhase||'intake'; const order=flowOrder(settings,l); const i=order.indexOf(phase); const canAdvance=i>=0&&i<order.length-1;
+        return (<div className="cli-detail">
+          <div className="cli-detail-h">
+            <div><div className="cli-name" onClick={()=>open(l.id)}>{l.name||l.company}</div><div className="subcell">{l.name} · {onboardingStat(l,onbItems).done}/{onbItems.length} loan steps complete</div></div>
+            <button className="m-x" onClick={()=>setExpand(null)}><X size={17}/></button>
+          </div>
+          <div className="cli-actions">
+            {canAdvance&&<button className="btn btn-p btn-sm" onClick={()=>advance(l)}><ArrowUpRight size={14}/>Advance to {phaseInfo(order[i+1],settings,l).label}</button>}
+            <select className="phase-sel" value={phase} onChange={e=>{ if(e.target.value==='churned'&&!window.confirm('Mark this client churned? They drop out of the default view.')) return; setClientPhase(l.id,e.target.value); }}>
+              {clientPhaseList(settings,l).map(p=><option key={p.key} value={p.key}>{p.label}{p.custom?' (custom)':''}</option>)}
+            </select>
+            <CustomPhaseAdd settings={settings} onAdd={info=>addCustomPhase(l.id,info)}/>
+          </div>
+          {(l.customPhases||[]).length>0&&<div className="cp-list">{(l.customPhases||[]).map(cp=><span key={cp.key} className="cp-chip" style={{borderColor:cp.color,color:cp.color}}><span className="dot" style={{background:cp.color}}/>{cp.label}<span className="subcell" style={{fontWeight:400}}>after {phaseInfo(cp.after,settings).label}</span><button onClick={()=>{if(window.confirm(`Remove custom phase "${cp.label}"?`))removeCustomPhase(l.id,cp.key);}}><X size={11}/></button></span>)}</div>}
+          {onbGroups(onbItems).map(g=>{const gp=phaseProgress(l,g.phase,onbItems);return (<div className="onb-group" key={g.phase}>
+            <div className="onb-gh"><PhaseBadge k={g.phase} client={l}/><span className="onb-gc">{gp.done}/{gp.total}</span></div>
+            {g.items.map(({key,label})=>{const e=normEntry((l.onboarding||{})[key]);const done=!!e.done;const od=!done&&e.due&&daysUntil(e.due)<0;return (
+              <div className={'onb-item'+(done?' done':'')+(od?' over':'')} key={key}>
+                <span className="onb-check" onClick={()=>toggleOnboarding(l.id,key)}>{done?<CheckCircle2 size={17} color={GREEN}/>:<Circle size={17} color={od?RED:'#C9C5D9'}/>}</span>
+                <span className="onb-label" onClick={()=>toggleOnboarding(l.id,key)}>{label}</span>
+                {done?<span className="onb-date done">✓ {fmtDate(e.done)}</span>
+                     :<label className="onb-due"><span>{od?'overdue':'due'}</span><input type="date" className={od?'over':''} value={e.due||''} onChange={ev=>setOnboardingDue(l.id,key,ev.target.value)}/></label>}
+              </div>);})}
+          </div>);})}
+        </div>);
+      })():<div className="cli-hint"><ChevronUp size={14}/>Tap a client card to open its onboarding checklist and phase controls.</div>}
+    </>}
+  </>);
+}
+
+/* add-a-custom-phase popover (per client) */
+function CustomPhaseAdd({settings,onAdd}){
+  const [openF,setOpenF]=useState(false);
+  const [label,setLabel]=useState(''); const [color,setColor]=useState('#7A5CC8'); const [after,setAfter]=useState('build');
+  const flowStd=stdPhases(settings).filter(p=>p.flow);
+  const submit=()=>{ if(!label.trim())return; onAdd({label,color,after}); setLabel(''); setOpenF(false); };
+  if(!openF) return <button className="btn btn-s btn-sm" onClick={()=>setOpenF(true)}><Plus size={13}/>Custom phase</button>;
+  return (<div className="cp-add">
+    <input placeholder="Phase name (e.g. Paused)" value={label} onChange={e=>setLabel(e.target.value)} autoFocus/>
+    <input type="color" value={color} onChange={e=>setColor(e.target.value)} title="Color"/>
+    <label>after<select value={after} onChange={e=>setAfter(e.target.value)}>{flowStd.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}</select></label>
+    <button className="btn btn-p btn-sm" onClick={submit}>Add</button>
+    <button className="btn btn-g btn-sm" onClick={()=>setOpenF(false)}>Cancel</button>
+  </div>);
+}
+
+/* ===================== MONEY ===================== */
+function Money({leads,stages}){
+  const m=useMetrics(leads,stages);const won=leads.filter(l=>sOf(l.stage,stages).won);
+  const opt=DEFAULT_OPTIONS; const months=lastNMonths(6);
+  const setupByMonth=months.map(k=>({name:monthLabel(k),Setup:won.filter(l=>l.closedAt&&monthKey(l.closedAt)===k).reduce((a,l)=>a+num(l.dealValue),0)}));
+  const mrrByMonth=months.map(k=>{const end=k+'-31';const v=leads.filter(l=>l.retainerActive&&l.retainerStart&&l.retainerStart<=end).reduce((a,l)=>a+num(l.retainer),0);return {name:monthLabel(k),MRR:v};});
+  const sources=[...new Set(leads.map(l=>l.source).filter(Boolean))];
+  const bySource=sources.map(s=>({name:s,Value:won.filter(l=>l.source===s).reduce((a,l)=>a+num(l.dealValue)+num(l.retainer)*12,0)})).filter(d=>d.Value>0);
+  const services=[...new Set(leads.flatMap(l=>l.serviceInterest||[]))];
+  const byService=services.map(s=>({name:s.replace(' / ','/'),Deals:leads.filter(l=>(l.serviceInterest||[]).includes(s)).length})).filter(d=>d.Deals>0);
+  const funnel=stages.filter(s=>!s.lost).map((s,i,arr)=>({name:s.label,Leads:leads.filter(l=>sIdx(l.stage,stages)>=sIdx(s.key,stages)&&!sOf(l.stage,stages).lost).length}));
+  const anyMoney=m.wonValue>0||m.mrr>0;
+  return (<>
+    <div className="kgrid">
+      <Kpi variant="green" label="Closed Setup Rev" value={usd(m.wonValue)} icon={<CheckCircle2 size={14}/>} d={`${m.wonCount} deals`}/>
+      <Kpi variant="gold" label="MRR" value={usd(m.mrr)} icon={<Repeat size={14}/>} d={`${usd(m.mrr*12)}/yr`}/>
+      <Kpi variant="accent" label="Weighted Pipeline" value={usd(m.weighted)} icon={<Target size={14}/>} d={`${usd(m.openValue)} unweighted`}/>
+      <Kpi label="Win Rate" value={pct(m.winRate)} icon={<Percent size={14}/>} d={`avg deal ${usdK(m.avgDeal)}`}/>
+      <Kpi label="Avg Retainer" value={usd(m.avgRet)} icon={<Repeat size={14}/>} d={`${m.retainers} active`}/>
+    </div>
+    {!anyMoney&&<div className="note" style={{marginBottom:18}}><b>These charts fill in as you close deals and turn on retainers.</b> Move a lead to a Won stage and set its Deal value + Monthly Retainer, and every number here updates automatically.</div>}
+    <div className="row r2">
+      <ChartCard title="MRR Growth" sub="Recurring revenue, last 6 months" empty={mrrByMonth.some(d=>d.MRR>0)?null:'No retainers yet.'}>
+        <div className="chart-sm"><ResponsiveContainer width="100%" height="100%"><AreaChart data={mrrByMonth} margin={{top:6,right:10,left:-8,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis dataKey="name" tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/><YAxis tickFormatter={usdK} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/>
+          <Tooltip contentStyle={tipStyle} formatter={v=>usd(v)}/><Area type="monotone" dataKey="MRR" stroke={COBALT} fill={COBALT} fillOpacity={.18} strokeWidth={3}/></AreaChart></ResponsiveContainer></div>
+      </ChartCard>
+      <ChartCard title="Setup Revenue by Month" sub="One-time cash from closes" empty={setupByMonth.some(d=>d.Setup>0)?null:'No closed setup revenue yet.'}>
+        <div className="chart-sm"><ResponsiveContainer width="100%" height="100%"><BarChart data={setupByMonth} margin={{top:6,right:10,left:-8,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis dataKey="name" tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/><YAxis tickFormatter={usdK} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/>
+          <Tooltip contentStyle={tipStyle} formatter={v=>usd(v)} cursor={{fill:'#F4F6FB'}}/><Bar dataKey="Setup" fill={INDIGO} radius={[6,6,0,0]}/></BarChart></ResponsiveContainer></div>
+      </ChartCard>
+    </div>
+    <div className="row r2">
+      <ChartCard title="Revenue by Lead Source" sub="Setup + annual recurring" empty={bySource.length?null:'No revenue attributed yet.'}>
+        <div className="chart-sm"><ResponsiveContainer width="100%" height="100%"><BarChart layout="vertical" data={bySource} margin={{top:4,right:14,left:30,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis type="number" tickFormatter={usdK} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/><YAxis type="category" dataKey="name" tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false} width={90}/>
+          <Tooltip contentStyle={tipStyle} formatter={v=>usd(v)} cursor={{fill:'#F4F6FB'}}/><Bar dataKey="Value" radius={[0,6,6,0]}>{bySource.map((e,i)=><Cell key={i} fill={PIE[i%PIE.length]}/>)}</Bar></BarChart></ResponsiveContainer></div>
+      </ChartCard>
+      <ChartCard title="Conversion Funnel" sub="How far leads get" empty={leads.length?null:'No leads yet.'}>
+        <div className="chart-sm"><ResponsiveContainer width="100%" height="100%"><BarChart layout="vertical" data={funnel} margin={{top:4,right:14,left:14,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis type="number" allowDecimals={false} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/><YAxis type="category" dataKey="name" tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false} width={80}/>
+          <Tooltip contentStyle={tipStyle} cursor={{fill:'#F4F6FB'}}/><Bar dataKey="Leads" fill={COBALT} radius={[0,6,6,0]}/></BarChart></ResponsiveContainer></div>
+      </ChartCard>
+    </div>
+    <ChartCard title="Service Interest" sub="Across all leads & clients" empty={byService.length?null:'No services tagged yet.'}>
+      <div className="chart-sm"><ResponsiveContainer width="100%" height="100%"><BarChart data={byService} margin={{top:6,right:10,left:-12,bottom:0}}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F6"/><XAxis dataKey="name" tick={{fontSize:10,fill:'#8E89A8'}} axisLine={false} tickLine={false} interval={0} angle={-12} textAnchor="end" height={50}/><YAxis allowDecimals={false} tick={{fontSize:11,fill:'#8E89A8'}} axisLine={false} tickLine={false}/>
+        <Tooltip contentStyle={tipStyle} cursor={{fill:'#F4F6FB'}}/><Bar dataKey="Deals" fill={GOLD} radius={[6,6,0,0]}/></BarChart></ResponsiveContainer></div>
+    </ChartCard>
+  </>);
+}
+
+/* ===================== SETTINGS ===================== */
+/* ===================== INVOICES ===================== */
+function Invoices({invoices,leads,settings,onNew,open}){
+  const [filter,setFilter]=useState('all');
+  const rows=(invoices||[]).map(inv=>({inv,st:invState(inv),total:invTotal(inv)}));
+  const outstanding=rows.filter(r=>r.st!=='paid').reduce((a,r)=>a+r.total,0);
+  const paid=rows.filter(r=>r.st==='paid').reduce((a,r)=>a+r.total,0);
+  const overdue=rows.filter(r=>r.st==='overdue').length;
+  const tabs=[['all','All'],['draft','Draft'],['sent','Sent'],['overdue','Overdue'],['paid','Paid']];
+  const shown=rows.filter(r=>filter==='all'?true:r.st===filter).sort((a,b)=>(b.inv.issueDate||'').localeCompare(a.inv.issueDate||''));
+  const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+  return (<>
+    <div className="kgrid">
+      <Kpi variant="accent" label="Outstanding" value={usd(outstanding)} icon={<Receipt size={14}/>} d={`${rows.filter(r=>r.st!=='paid').length} unpaid`}/>
+      <Kpi variant="green" label="Collected" value={usd(paid)} icon={<CheckCircle2 size={14}/>} d={`${rows.filter(r=>r.st==='paid').length} paid`}/>
+      <Kpi label="Overdue" value={overdue} icon={<AlertTriangle size={14}/>} d="past due date"/>
+    </div>
+    <div className="inv-bar">
+      <div className="seg">{tabs.map(([k,l])=><button key={k} className={'seg-b '+(filter===k?'on':'')} onClick={()=>setFilter(k)}>{l}</button>)}</div>
+      <button className="btn btn-p" onClick={()=>onNew()}><Plus size={15}/>New Invoice</button>
+    </div>
+    <div className="tbl-wrap">
+      {shown.length?<table className="tbl"><thead><tr><th>Invoice</th><th>Client</th><th>Issued</th><th>Due</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>{shown.map(({inv,st,total})=>(<tr key={inv.id} onClick={()=>open(inv.id)}>
+        <td style={{fontWeight:600,color:INK}}>{inv.number}</td>
+        <td><div className="namecell">{inv.billTo?.company||inv.billTo?.name||'—'}</div>{inv.billTo?.company&&inv.billTo?.name&&<div className="subcell">{inv.billTo.name}</div>}</td>
+        <td className="subcell">{fmtDate(inv.issueDate)}</td>
+        <td className="subcell">{fmtDate(inv.dueDate)}</td>
+        <td style={{fontWeight:600,color:INK}}>{usd(total)}</td>
+        <td><span className={'badge inv-'+st}>{cap(st)}</span></td>
+      </tr>))}</tbody></table>
+      :<div className="empty">No invoices yet. Hit <b>New Invoice</b> to bill a client.</div>}
+    </div>
+  </>);
+}
+
+function InvoicePreview({inv,settings,saveSettings}){
+  const iv=settings.invoicing||DEFAULT_INVOICING; const biz=iv.biz||DEFAULT_INVOICING.biz;
+  const accent=iv.accent||'#2B4DE0'; const logoH=iv.logoH||46;
+  const layout=iv.layout||DEFAULT_INVOICING.layout;
+  const sections={...DEFAULT_INV_SECTIONS,...(iv.sections||{})};
+  const [order,setOrder]=useState(layout.order||DEFAULT_INVOICING.layout.order);
+  const [dragK,setDragK]=useState(null);
+  const [sel,setSel]=useState(null);
+  useEffect(()=>{setOrder((iv.layout||DEFAULT_INVOICING.layout).order||DEFAULT_INVOICING.layout.order);},[((iv.layout||{}).order||[]).join(',')]);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const secStyle=k=>{const s=sections[k]||DEFAULT_INV_SECTIONS[k];return {fontSize:s.fz+'px',lineHeight:s.lh};};
+  const adj=(k,dfz,dlh)=>{ const cur=sections[k]||DEFAULT_INV_SECTIONS[k]; const next={fz:clamp(+(cur.fz+dfz).toFixed(1),6,30),lh:clamp(+(cur.lh+dlh).toFixed(2),1,2.6)}; if(saveSettings) saveSettings({...settings,invoicing:{...iv,sections:{...sections,[k]:next}}}); };
+  const saveLayout=next=>{ if(saveSettings) saveSettings({...settings,invoicing:{...iv,layout:{...layout,...next}}}); };
+  const onSecOver=(e,key)=>{ e.preventDefault(); if(!dragK||dragK===key)return; setOrder(o=>{const a=o.filter(k=>k!==dragK);const i=a.indexOf(key);a.splice(i<0?a.length:i,0,dragK);return a;}); };
+  const onSecDrop=()=>{ setDragK(null); saveLayout({order}); };
+  const swapHeader=()=>saveLayout({headerSwap:!layout.headerSwap});
+  const bt=inv.billTo||{}; const items=inv.items||[];
+  const sub=invSubtotal(inv),tax=invTax(inv),total=invTotal(inv),st=invState(inv);
+  const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+  return (<div className="inv-preview-wrap">
+          <div className="inv-page-tools">
+            {sel?(()=>{const s=sections[sel]||DEFAULT_INV_SECTIONS[sel];const NAME={headerLeft:'Header · left',headerRight:'Header · right',billto:'Bill To',items:'Line items',totals:'Totals',pay:'Payment link',notes:'Notes'};return(
+              <div className="sec-toolbar">
+                <span className="sec-tl">{NAME[sel]}</span>
+                <span className="sec-grp">Font<button className="stp" onClick={()=>adj(sel,-0.5,0)}>−</button><span className="val">{s.fz}</span><button className="stp" onClick={()=>adj(sel,0.5,0)}>+</button></span>
+                <span className="sec-grp">Spacing<button className="stp" onClick={()=>adj(sel,0,-0.05)}>−</button><span className="val">{s.lh.toFixed(2)}</span><button className="stp" onClick={()=>adj(sel,0,0.05)}>+</button></span>
+                <button className="sec-done" onClick={()=>setSel(null)}>Done</button>
+              </div>);})():<span className="sec-hint">Tap any section to resize its text &amp; spacing · hover to drag</span>}
+            <button className="swapbtn" onClick={swapHeader} title="Swap header sides"><ArrowUpDown size={13} style={{transform:'rotate(90deg)'}}/>Swap header</button>
+          </div>
+          <div className="inv-preview" id="invprint">
+            {(()=>{ const bizBlock=(<div key="biz" className={'ip-biz ip-sec'+(sel==='headerLeft'?' sel':'')} style={secStyle('headerLeft')} onClick={e=>{e.stopPropagation();setSel('headerLeft');}}>
+                {(iv.showLogo!==false&&settings.logo)?<img src={settings.logo} alt="logo" className="ip-logo" style={{maxHeight:logoH,maxWidth:logoH*4.5}}/>:<div className="ip-name">{biz.name||'ProyTech'}</div>}
+                <div className="ip-bizmeta">{(biz.address||'').split('\n').map((l,i)=><div key={i}>{l}</div>)}{biz.email&&<div>{biz.email}</div>}{biz.phone&&<div>{biz.phone}</div>}</div>
+              </div>);
+              const metaBlock=(<div key="meta" className={'ip-meta ip-sec'+(layout.headerSwap?' left':'')+(sel==='headerRight'?' sel':'')} style={secStyle('headerRight')} onClick={e=>{e.stopPropagation();setSel('headerRight');}}>
+                <div className="ip-title" style={{color:accent}}>INVOICE</div>
+                <div className="ip-num">{inv.number}</div>
+                <div className="ip-dates"><div><span>Issued</span>{fmtDate(inv.issueDate)}</div><div><span>Due</span>{fmtDate(inv.dueDate)}</div></div>
+                <div className={'ip-stamp inv-'+st}>{cap(st)}</div>
+              </div>);
+              return <div className="ip-top">{layout.headerSwap?[metaBlock,bizBlock]:[bizBlock,metaBlock]}</div>; })()}
+            <div className="ip-rule" style={{background:accent}}/>
+            {(()=>{ const blocks={
+                billto:(<div className="ip-billto" style={secStyle('billto')}><div className="ip-lbl">Bill To</div><div className="ip-btname">{bt.company||bt.name||'—'}</div>{bt.company&&bt.name&&<div>{bt.name}</div>}{(bt.address||'').split('\n').map((l,i)=>l&&<div key={i}>{l}</div>)}{bt.email&&<div>{bt.email}</div>}</div>),
+                items:(<table className="ip-table" style={secStyle('items')}><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>{items.map((it,i)=>(<tr key={it.id||i}><td>{it.label||'—'}</td><td>{num(it.qty)}</td><td>{usd(it.amount)}</td><td>{usd(num(it.qty)*num(it.amount))}</td></tr>))}</tbody></table>),
+                totals:(<div className="ip-totals" style={secStyle('totals')}><div className="ip-tr"><span>Subtotal</span><b>{usd(sub)}</b></div>{num(inv.taxRate)>0&&<div className="ip-tr"><span>Tax ({num(inv.taxRate)}%)</span><b>{usd(tax)}</b></div>}<div className="ip-tr ip-grand"><span>Total Due</span><b style={{color:accent}}>{usd(total)}</b></div></div>),
+                pay:(iv.showPay!==false&&inv.paymentLink)?(<div className="ip-pay" style={secStyle('pay')}>Pay online: <a href={inv.paymentLink} style={{color:accent}}>{inv.paymentLink}</a></div>):null,
+                notes:(iv.showNotes!==false&&inv.notes)?(<div className="ip-notes" style={secStyle('notes')}>{inv.notes}</div>):null,
+              };
+              return order.filter(k=>blocks[k]).map(key=>(<div key={key} className={'ip-block ip-sec'+(dragK===key?' dragk':'')+(sel===key?' sel':'')} draggable onDragStart={()=>setDragK(key)} onDragOver={e=>onSecOver(e,key)} onDragEnd={onSecDrop} onClick={e=>{e.stopPropagation();setSel(key);}}>
+                <span className="ip-drag" title="Drag to reorder"><GripVertical size={13}/></span>
+                {blocks[key]}
+              </div>)); })()}
+          </div>
+        </div>);
+}
+
+function InvoiceModal({invoice,leads,settings,saveSettings,onSave,onDelete,onClose}){
+  const [inv,setInv]=useState(invoice);
+  useEffect(()=>setInv(invoice),[invoice.id]);
+  const patch=p=>{const n={...inv,...p};setInv(n);onSave(n);};
+  const iv=settings.invoicing||DEFAULT_INVOICING;
+  const bt=inv.billTo||{};
+  const setBT=p=>patch({billTo:{...bt,...p}});
+  const items=inv.items||[];
+  const setItem=(i,p)=>{const a=items.slice();a[i]={...a[i],...p};patch({items:a});};
+  const addItem=()=>patch({items:[...items,{id:uid(),label:'',qty:1,amount:0}]});
+  const delItem=i=>patch({items:items.filter((_,j)=>j!==i)});
+  const pickClient=id=>{const l=leads.find(x=>x.id===id); if(!l){patch({clientId:''});return;} patch({clientId:id,billTo:{name:l.name||'',company:l.company||'',email:l.email||'',address:bt.address||''},items:itemsFromLead(l)});};
+  const sub=invSubtotal(inv),tax=invTax(inv),total=invTotal(inv),st=invState(inv);
+  const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+  return (<div className="scrim2" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal inv-modal" onMouseDown={e=>e.stopPropagation()}>
+      <div className="m-head">
+        <div style={{minWidth:0}}><h2>{inv.number}</h2><div className="meta">Invoice · {cap(st)}</div></div>
+        <div className="inv-actions">
+          {inv.status!=='paid'&&inv.status!=='sent'&&<button className="btn btn-s btn-sm" onClick={()=>patch({status:'sent'})}><Send size={14}/>Mark sent</button>}
+          {inv.status!=='paid'
+            ? <button className="btn btn-p btn-sm" onClick={()=>patch({status:'paid',paidDate:todayISO()})}><CheckCircle2 size={14}/>Mark paid</button>
+            : <button className="btn btn-s btn-sm" onClick={()=>patch({status:'sent',paidDate:''})}>Unmark paid</button>}
+          <button className="btn btn-s btn-sm" onClick={()=>window.print()}><Printer size={14}/>Print / PDF</button>
+          <button className="m-x" onClick={onClose}><X size={18}/></button>
+        </div>
+      </div>
+      <div className="inv-body">
+        <div className="inv-edit">
+          <div className="dh"><Contact2 size={13}/>Bill To</div>
+          <div className="field" style={{marginBottom:10}}><label>Client (auto-fills)</label><select value={inv.clientId||''} onChange={e=>pickClient(e.target.value)}><option value="">— Manual / no client —</option>{leads.map(l=><option key={l.id} value={l.id}>{l.name||l.company}</option>)}</select></div>
+          <div className="fgrid">
+            <div className="field"><label>Company</label><input value={bt.company||''} onChange={e=>setBT({company:e.target.value})}/></div>
+            <div className="field"><label>Contact name</label><input value={bt.name||''} onChange={e=>setBT({name:e.target.value})}/></div>
+            <div className="field"><label>Email</label><input value={bt.email||''} onChange={e=>setBT({email:e.target.value})}/></div>
+            <div className="field full"><label>Address</label><textarea rows={2} value={bt.address||''} onChange={e=>setBT({address:e.target.value})}/></div>
+          </div>
+          <div className="dh mt"><CalendarClock size={13}/>Invoice details</div>
+          <div className="fgrid">
+            <div className="field"><label>Invoice #</label><input value={inv.number||''} onChange={e=>patch({number:e.target.value})}/></div>
+            <div className="field"><label>Issue date</label><input type="date" value={inv.issueDate||''} onChange={e=>patch({issueDate:e.target.value})}/></div>
+            <div className="field"><label>Due date</label><input type="date" value={inv.dueDate||''} onChange={e=>patch({dueDate:e.target.value})}/></div>
+          </div>
+          <div className="dh mt"><DollarSign size={13}/>Line Items</div>
+          <div className="inv-items-edit">
+            <div className="iie-h"><span>Description</span><span>Qty</span><span>Rate</span><span>Amount</span><span/></div>
+            {items.map((it,i)=>(<div className="iie-row" key={it.id||i}>
+              <input className="iie-label" value={it.label||''} placeholder="Description" onChange={e=>setItem(i,{label:e.target.value})}/>
+              <input className="iie-qty" type="number" value={it.qty??1} onChange={e=>setItem(i,{qty:e.target.value})}/>
+              <input className="iie-rate" type="number" value={it.amount??0} onChange={e=>setItem(i,{amount:e.target.value})}/>
+              <span className="iie-amt">{usd(num(it.qty)*num(it.amount))}</span>
+              <button className="ex-del" onClick={()=>delItem(i)}><X size={14}/></button>
+            </div>))}
+            <button className="addline" onClick={addItem}><Plus size={13}/>Add item</button>
+          </div>
+          <div className="fgrid" style={{marginTop:12}}>
+            <div className="field"><label>Tax rate (%)</label><input type="number" value={inv.taxRate??0} onChange={e=>patch({taxRate:num(e.target.value)})}/></div>
+            <div className="field"><label>Payment link</label><input placeholder="https://…" value={inv.paymentLink||''} onChange={e=>patch({paymentLink:e.target.value})}/></div>
+            <div className="field full"><label>Notes / terms</label><textarea rows={2} value={inv.notes||''} onChange={e=>patch({notes:e.target.value})}/></div>
+          </div>
+          <button className="btn btn-d btn-sm" style={{marginTop:14}} onClick={()=>{if(window.confirm('Delete invoice '+inv.number+'? This cannot be undone.'))onDelete(inv.id);}}><Trash2 size={14}/>Delete invoice</button>
+        </div>
+
+        <InvoicePreview inv={inv} settings={settings} saveSettings={saveSettings}/>
+      </div>
+    </div>
+  </div>);
+}
+
+const TX_TYPES={
+  income:{label:'Money in',dir:'in'},
+  contribution:{label:'Owner contribution',dir:'in'},
+  expense:{label:'Expense',dir:'out'},
+  draw:{label:'Owner draw',dir:'out'},
+};
+const EXP_CATS=['Software','Advertising','Office','Meals','Travel','Contractors','Fees','Equipment','Other'];
+const INC_CATS=['Client payment','Retainer','Refund','Other'];
+const TX_WHO=['Business',...BRAND.team];
+const TX_METHODS=['Card','Bank transfer','Cash','Check','Other'];
+const csvq=s=>{s=String(s==null?'':s);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+const toB64=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
+
+/* ===================== Tasks (shared · AI-ranked) ===================== */
+const TASK_OWNERS=[...BRAND.team,'Both'];
+const OWNER_PALETTE=[COBALT,'#7A5CC8','#0E9AA7','#D97706'];
+const ownerColor=o=>{const i=BRAND.team.indexOf(o);return i>=0?OWNER_PALETTE[i%OWNER_PALETTE.length]:GREEN;};
+const meOwner=me=>BRAND.team.includes(me)?me:(BRAND.team[0]||'');
+const newTask=owner=>({id:uid(),title:'',notes:'',owner:owner||'Both',leadId:'',due:todayISO(),revenue:3,urgency:3,effort:3,done:false,doneAt:'',doneBy:'',aiRank:null,aiReason:'',createdAt:new Date().toISOString()});
+const taskScore=t=>num(t.revenue)*num(t.urgency);
+
+function Tasks({tasks,leads,me,upsertTask,deleteTask,saveTasks,open}){
+  const [who,setWho]=useState('all');
+  const [show,setShow]=useState('open');
+  const [title,setTitle]=useState('');
+  const [addOwner,setAddOwner]=useState(meOwner(me));
+  const [addDue,setAddDue]=useState(todayISO());
+  const [edit,setEdit]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const leadName=id=>{const l=leads.find(x=>x.id===id);return l?(l.name||l.company||'Lead'):'';};
+
+  const add=()=>{ const t=title.trim(); if(!t)return; upsertTask({...newTask(addOwner),title:t,due:addDue||todayISO()}); setTitle(''); };
+
+  const filtered=tasks.filter(t=>{
+    const mine=meOwner(me);
+    const w=who==='all'||(who==='mine'&&t.owner===mine)||(who==='both'&&t.owner==='Both')||(who!=='all'&&who!=='mine'&&who!=='both'&&t.owner===who);
+    const s=show==='all'||(show==='open'&&!t.done)||(show==='done'&&t.done);
+    return w&&s;
+  });
+  const ordered=[...filtered].sort((a,b)=>{
+    if(a.done!==b.done)return a.done?1:-1;
+    if(a.aiRank!=null&&b.aiRank!=null)return a.aiRank-b.aiRank;
+    if(a.aiRank!=null)return -1; if(b.aiRank!=null)return 1;
+    if(taskScore(b)!==taskScore(a))return taskScore(b)-taskScore(a);
+    if(num(a.effort)!==num(b.effort))return num(a.effort)-num(b.effort);
+    return (a.createdAt||'').localeCompare(b.createdAt||'');
+  });
+  const ranked=tasks.some(t=>!t.done&&t.aiRank!=null);
+
+  const runAI=async()=>{
+    const open=tasks.filter(t=>!t.done);
+    if(!open.length){window.alert('No open tasks to rank yet.');return;}
+    setBusy(true);
+    try{
+      const payload=open.map(t=>({id:t.id,title:t.title,notes:t.notes||'',owner:t.owner,lead:leadName(t.leadId),due:t.due||'',revenue:num(t.revenue),urgency:num(t.urgency),effort:num(t.effort)}));
+      const r=await fetch('/api/rank-tasks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tasks:payload})});
+      const j=await r.json();
+      if(!j.ok){window.alert('AI ranking isn\u2019t available: '+(j.error||'unknown')+'.\nTasks are still sorted by impact \u00d7 urgency.');setBusy(false);return;}
+      const map={}; (j.ranking||[]).forEach((x,i)=>{map[x.id]={rank:i+1,reason:x.reason||''};});
+      saveTasks(tasks.map(t=>{ if(t.done)return {...t,aiRank:null}; const m=map[t.id]; return m?{...t,aiRank:m.rank,aiReason:m.reason}:{...t,aiRank:null,aiReason:''}; }));
+    }catch(e){window.alert('AI ranking failed: '+(e.message||e));}
+    setBusy(false);
+  };
+  const clearAI=()=>saveTasks(tasks.map(t=>({...t,aiRank:null,aiReason:''})));
+
+  return (<>
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+        <input value={title} onChange={e=>setTitle(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')add();}} placeholder="Add a task and hit Enter\u2026" style={{flex:'1 1 260px',padding:'11px 13px',border:'1px solid #E2E3EE',borderRadius:11,fontSize:14,background:'#fff',color:INK}}/>
+        <div className="task-daypick">
+          <button type="button" className={'day-chip'+(addDue===todayISO()?' on':'')} onClick={()=>setAddDue(todayISO())}>Today</button>
+          <button type="button" className={'day-chip'+(addDue===addDays(todayISO(),1)?' on':'')} onClick={()=>setAddDue(addDays(todayISO(),1))}>Tomorrow</button>
+          <label className="day-date"><CalendarClock size={14}/><input type="date" value={addDue} onChange={e=>setAddDue(e.target.value||todayISO())}/></label>
+        </div>
+        <div className="seg">{TASK_OWNERS.map(o=><button key={o} className={'seg-b '+(addOwner===o?'on':'')} onClick={()=>setAddOwner(o)}>{o}</button>)}</div>
+        <button className="btn btn-p" onClick={add}><Plus size={16}/>Add</button>
+      </div>
+    </div>
+
+    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginBottom:14}}>
+      <div className="seg">
+        <button className={'seg-b '+(who==='all'?'on':'')} onClick={()=>setWho('all')}>All</button>
+        <button className={'seg-b '+(who==='mine'?'on':'')} onClick={()=>setWho('mine')}>Mine</button>
+        {BRAND.team.filter(o=>o!==meOwner(me)).map(o=><button key={o} className={'seg-b '+(who===o?'on':'')} onClick={()=>setWho(o)}>{o}</button>)}
+        <button className={'seg-b '+(who==='both'?'on':'')} onClick={()=>setWho('both')}>Shared</button>
+      </div>
+      <div className="seg">
+        <button className={'seg-b '+(show==='open'?'on':'')} onClick={()=>setShow('open')}>Open</button>
+        <button className={'seg-b '+(show==='done'?'on':'')} onClick={()=>setShow('done')}>Done</button>
+        <button className={'seg-b '+(show==='all'?'on':'')} onClick={()=>setShow('all')}>All</button>
+      </div>
+      <div style={{marginLeft:'auto',display:'flex',gap:8,alignItems:'center'}}>
+        {ranked&&<button className="btn btn-g btn-sm" onClick={clearAI}>Clear ranking</button>}
+        <button className="btn btn-p" disabled={busy} onClick={runAI}>{busy?<Loader2 size={15} className="spin"/>:<Sparkles size={15}/>}{busy?'Ranking\u2026':'AI rank'}</button>
+      </div>
+    </div>
+
+    {ranked&&<div className="ai-banner ai-done" style={{marginBottom:14}}><Sparkles size={15}/>Ranked for the $10K sprint \u2014 top of the list moves cash first.</div>}
+
+    {ordered.length? <div style={{display:'flex',flexDirection:'column',gap:10}}>
+      {ordered.map(t=>{
+        const du=t.due?daysUntil(t.due):null;
+        const dueColor=du==null?'#8b88a0':du<0?RED:du===0?GOLD:'#5A5680';
+        const dueLabel=t.due?(du<0?`${-du}d overdue`:du===0?'Due today':du===1?'Due tomorrow':`Due in ${du}d`):'No date';
+        return (<div key={t.id} className="card" style={{padding:'13px 15px',display:'flex',gap:12,alignItems:'flex-start',opacity:t.done?.6:1}}>
+          <button onClick={()=>upsertTask({...t,done:!t.done,doneAt:t.done?'':new Date().toISOString(),doneBy:t.done?'':(t.owner&&t.owner!=='Both'?t.owner:me),aiRank:t.done?t.aiRank:null,aiReason:t.done?t.aiReason:''})} style={{background:'none',border:'none',cursor:'pointer',padding:0,marginTop:1,color:t.done?GREEN:'#c3c2d4',flex:'none'}} title={t.done?'Mark open':'Mark done'}>{t.done?<CheckCircle2 size={22}/>:<Circle size={22}/>}</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              {t.aiRank!=null&&!t.done&&<span className="pill" style={{background:INK,color:'#fff',fontWeight:700}}>#{t.aiRank}</span>}
+              <span style={{fontWeight:600,color:INK,fontSize:15,textDecoration:t.done?'line-through':'none'}}>{t.title}</span>
+            </div>
+            {t.aiReason&&!t.done&&<div style={{fontSize:12.5,color:COBALT,marginTop:4,display:'flex',alignItems:'center',gap:5}}><Sparkles size={12}/>{t.aiReason}</div>}
+            <div style={{display:'flex',gap:7,flexWrap:'wrap',marginTop:8,alignItems:'center'}}>
+              <span className="pill" style={{background:ownerColor(t.owner)+'1A',color:ownerColor(t.owner)}}><span className="dot" style={{background:ownerColor(t.owner)}}/>{t.owner}</span>
+              {t.leadId&&leadName(t.leadId)&&(()=>{const l=leads.find(x=>x.id===t.leadId);const isC=l&&l.isClient;return <span className="pill" style={{background:isC?'rgba(31,157,85,.12)':'#F0F1F7',color:isC?'#1a7d46':'#5A5680',cursor:open?'pointer':'default'}} onClick={e=>{if(open){e.stopPropagation();open(t.leadId);}}} title={open?'Open '+(isC?'client':'lead'):undefined}>{isC?<Building2 size={11}/>:<Contact2 size={11}/>}{leadName(t.leadId)}{isC?' · client':''}</span>;})()}
+              <label className="task-due-chip" style={{background:du!=null&&du<0?'rgba(209,67,67,.1)':'#F0F1F7',color:dueColor}} title="Tap to reschedule"><CalendarClock size={11}/>{dueLabel}<input type="date" value={t.due||''} onChange={e=>upsertTask({...t,due:e.target.value})}/></label>
+              <span style={{fontSize:11,color:'#a6a2bc'}}>Impact {t.revenue} \u00b7 Urgency {t.urgency} \u00b7 Effort {t.effort}</span>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:4,flex:'none'}}>
+            <button className="m-x" style={{width:30,height:30}} onClick={()=>setEdit(t)} title="Edit"><SlidersHorizontal size={15}/></button>
+            <button className="m-x" style={{width:30,height:30}} onClick={()=>{if(window.confirm('Delete this task?'))deleteTask(t.id);}} title="Delete"><Trash2 size={15}/></button>
+          </div>
+        </div>);
+      })}
+    </div>
+    : <div className="empty">{show==='done'?'Nothing checked off yet.':'No tasks yet. Add your first one above \u2014 dump everything in your head here.'}</div>}
+
+    {edit&&<TaskModal task={edit} leads={leads} onSave={t=>{upsertTask(t);setEdit(null);}} onDelete={id=>{deleteTask(id);setEdit(null);}} onClose={()=>setEdit(null)}/>}
+  </>);
+}
+
+function TaskModal({task,leads,onSave,onDelete,onClose}){
+  const [d,setD]=useState({...task});
+  const set=p=>setD(x=>({...x,...p}));
+  const Knob=({label,field,hint})=>(<div className="field"><label>{label} \u2014 {d[field]} <span style={{color:'#a6a2bc',fontWeight:400}}>{hint}</span></label><input type="range" min="1" max="5" value={d[field]} onChange={e=>set({[field]:Number(e.target.value)})}/></div>);
+  return (<div className="scrim2" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal" style={{maxWidth:520}} onMouseDown={e=>e.stopPropagation()}>
+      <div className="m-head"><div><h2>Edit task</h2><div className="meta">Tune the knobs so the AI ranks it right</div></div><button className="m-x" onClick={onClose}><X size={18}/></button></div>
+      <div style={{padding:'4px 22px 22px'}}>
+        <div className="field"><label>Task</label><input value={d.title||''} onChange={e=>set({title:e.target.value})} placeholder="What needs doing?"/></div>
+        <div className="fgrid">
+          <div className="field"><label>Owner</label><select value={d.owner} onChange={e=>set({owner:e.target.value})}>{TASK_OWNERS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+          <div className="field"><label>Due date</label><input type="date" value={d.due||''} onChange={e=>set({due:e.target.value})}/></div>
+          <div className="field full"><label>Link to a client or lead</label>
+            <select value={d.leadId||''} onChange={e=>set({leadId:e.target.value})}>
+              <option value="">— none —</option>
+              {(()=>{ const lbl=l=>(l.company?l.company+(l.name?` (${l.name})`:''):l.name)||'Untitled';
+                const by=f=>leads.filter(f).sort((a,b)=>lbl(a).localeCompare(lbl(b)));
+                const cli=by(l=>l.isClient), lds=by(l=>!l.isClient&&!l.isRelationship), rel=by(l=>l.isRelationship&&!l.isClient);
+                return (<>
+                  {cli.length>0&&<optgroup label="Clients">{cli.map(l=><option key={l.id} value={l.id}>{lbl(l)}</option>)}</optgroup>}
+                  {lds.length>0&&<optgroup label="Leads">{lds.map(l=><option key={l.id} value={l.id}>{lbl(l)}</option>)}</optgroup>}
+                  {rel.length>0&&<optgroup label="Relationships">{rel.map(l=><option key={l.id} value={l.id}>{lbl(l)}</option>)}</optgroup>}
+                </>);
+              })()}
+            </select>
+          </div>
+        </div>
+        <Knob label="Revenue impact" field="revenue" hint="how much cash it moves"/>
+        <Knob label="Urgency" field="urgency" hint="how time-sensitive"/>
+        <Knob label="Effort" field="effort" hint="1 = quick win, 5 = heavy lift"/>
+        <div className="field"><label>Notes</label><input value={d.notes||''} onChange={e=>set({notes:e.target.value})} placeholder="Any detail that helps the ranking"/></div>
+        <div style={{display:'flex',gap:8,marginTop:16,alignItems:'center'}}>
+          <button className="btn btn-p" onClick={()=>onSave({...d,title:(d.title||'').trim()||'Untitled task'})}><CheckCircle2 size={15}/>Save</button>
+          <button className="btn btn-d btn-sm" onClick={()=>{if(window.confirm('Delete this task?'))onDelete(d.id);}}><Trash2 size={14}/>Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
+function Books({txns,upsertTxn,deleteTxn}){
+  const thisYear=todayISO().slice(0,4);
+  const [year,setYear]=useState(thisYear);
+  const [filter,setFilter]=useState('all');
+  const [edit,setEdit]=useState(null); // {txn, file}
+  const [busy,setBusy]=useState(false);
+  const fileRef=React.useRef(null);
+  const years=useMemo(()=>{const s=new Set(txns.map(t=>(t.date||'').slice(0,4)).filter(Boolean));s.add(thisYear);return [...s].sort().reverse();},[txns,thisYear]);
+  const yearTxns=useMemo(()=>txns.filter(t=>(t.date||'').slice(0,4)===year).sort((a,b)=>(b.date||'').localeCompare(a.date||'')),[txns,year]);
+  const shown=yearTxns.filter(t=>{const d=TX_TYPES[t.type]?.dir;return filter==='all'||(filter==='in'&&d==='in')||(filter==='out'&&d==='out')||(filter==='draw'&&t.type==='draw');});
+  const sum=pred=>yearTxns.filter(pred).reduce((a,t)=>a+num(t.amount),0);
+  const moneyIn=sum(t=>TX_TYPES[t.type]?.dir==='in');
+  const moneyOut=sum(t=>TX_TYPES[t.type]?.dir==='out');
+  const net=moneyIn-moneyOut;
+  const expenses=sum(t=>t.type==='expense');
+  const draws=BRAND.team.map(nm=>({nm,amt:sum(t=>t.type==='draw'&&t.who===nm)}));
+  const drawTotal=draws.reduce((a,d)=>a+d.amt,0);
+  const openReceipt=async t=>{ if(!t.receipt?.path)return; try{ const url=await db.receiptUrl(t.receipt.path); if(url){window.open(url,'_blank');return;} }catch(e){} try{ const blob=await db.downloadReceipt(t.receipt.path); const u=URL.createObjectURL(blob); window.open(u,'_blank'); }catch(e){ window.alert('Could not open the receipt file.'); } };
+  const onPickReceipt=e=>{ const f=e.target.files?.[0]; e.target.value=''; if(!f)return; setEdit({txn:null,file:f}); };
+  const downloadYear=async()=>{
+    if(!yearTxns.length){window.alert('No transactions for '+year+' yet.');return;}
+    setBusy(true);
+    try{
+      const zip=new JSZip();
+      const head=['Date','Type','Category','Vendor/Source','Method','Who','Amount','Notes','Receipt file'];
+      const lines=[head.join(',')].concat(yearTxns.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(t=>{
+        const signed=(TX_TYPES[t.type]?.dir==='out'?-1:1)*num(t.amount);
+        return [t.date||'',TX_TYPES[t.type]?.label||t.type,t.category||'',csvq(t.party),t.method||'',t.who||'',signed,csvq(t.notes),t.receipt?.name||''].join(',');
+      }));
+      lines.push(['','','','','','','TOTALS','',''].join(','));
+      lines.push(['Money in','','','','','',moneyIn,'',''].join(','));
+      lines.push(['Money out','','','','','',moneyOut,'',''].join(','));
+      lines.push(['Net','','','','','',net,'',''].join(','));
+      zip.file(`books-${year}.csv`,lines.join('\n'));
+      const rf=zip.folder('receipts');
+      let missing=0;
+      for(const t of yearTxns){ if(t.receipt?.path&&typeof db.downloadReceipt==='function'){ try{ const blob=await db.downloadReceipt(t.receipt.path); rf.file((t.date||'')+'-'+(t.receipt.name||t.receipt.path.split('/').pop()),blob);}catch(e){missing++;} } }
+      const out=await zip.generateAsync({type:'blob'});
+      const u=URL.createObjectURL(out);const a=document.createElement('a');a.href=u;a.download=`the-books-${year}.zip`;a.click();URL.revokeObjectURL(u);
+      if(missing)window.alert('Bundle downloaded. '+missing+' receipt file(s) could not be fetched (storage may not be set up yet).');
+    }catch(e){window.alert('Could not build the bundle: '+(e.message||e));}
+    setBusy(false);
+  };
+  return (<>
+    <input ref={fileRef} type="file" accept="application/pdf,image/*" style={{display:'none'}} onChange={onPickReceipt}/>
+    <div className="card" style={{marginBottom:18}}>
+      <div className="bk-actions">
+        <button className="btn btn-p" onClick={()=>fileRef.current?.click()}><Upload size={15}/>Upload receipt</button>
+        <button className="btn btn-s" onClick={()=>setEdit({txn:null,file:null})}><Plus size={15}/>Add transaction</button>
+        <button className="btn btn-s" style={{marginLeft:'auto'}} disabled={busy} onClick={downloadYear}>{busy?<Loader2 size={15} className="spin"/>:<FileDown size={15}/>}Download {year} for CPA</button>
+      </div>
+    </div>
+    <div className="kpis">
+      <Kpi variant="accent" label="Money in" value={usd(moneyIn)} icon={<ArrowDownLeft size={14}/>} d={year}/>
+      <Kpi label="Money out" value={usd(moneyOut)} icon={<ArrowUpRight size={14}/>} d={`${usd(expenses)} expenses`}/>
+      <Kpi label="Net" value={usd(net)} icon={<Wallet size={14}/>} d={net>=0?'positive':'negative'}/>
+      <Kpi label="Owner draws" value={usd(drawTotal)} icon={<Wallet size={14}/>} d={draws.map(d=>`${d.nm[0]} ${usd(d.amt)}`).join(' · ')||'—'}/>
+    </div>
+    <div className="bk-filters">
+      {[['all','All'],['in','Money in'],['out','Money out'],['draw','Draws']].map(([k,l])=>(
+        <button key={k} className={'bk-chip'+(filter===k?' on':'')} onClick={()=>setFilter(k)}>{l}</button>))}
+      <div className="bk-yr"><span style={{fontSize:12,color:'#8b88a0',fontWeight:600}}>Year</span><select value={year} onChange={e=>setYear(e.target.value)}>{years.map(y=><option key={y} value={y}>{y}</option>)}</select></div>
+    </div>
+    <div className="card">
+      {shown.length?<table className="tbl"><thead><tr><th>Date</th><th>Type</th><th>Category</th><th>Vendor / Source</th><th>Who</th><th>Receipt</th><th style={{textAlign:'right'}}>Amount</th></tr></thead>
+      <tbody>{shown.map(t=>{const m=TX_TYPES[t.type]||{};const out=m.dir==='out';return(<tr key={t.id} onClick={()=>setEdit({txn:t,file:null})}>
+        <td className="subcell">{fmtDate(t.date)}</td>
+        <td><span className="tx-type">{out?<ArrowUpRight size={13} color="#b4322e"/>:<ArrowDownLeft size={13} color="#1f9d63"/>}{m.label||t.type}</span></td>
+        <td className="subcell">{t.category||'—'}</td>
+        <td><div className="namecell">{t.party||'—'}</div>{t.notes&&<div className="subcell">{t.notes}</div>}</td>
+        <td className="subcell">{t.who||'—'}</td>
+        <td onClick={e=>{e.stopPropagation();if(t.receipt)openReceipt(t);}}>{t.receipt?<span className="rc-btn"><Paperclip size={13}/>View</span>:<span className="rc-none">—</span>}</td>
+        <td style={{textAlign:'right'}}><span className={'tx-amt '+(out?'tx-out':'tx-in')}>{out?'−':'+'}{usd(num(t.amount))}</span></td>
+      </tr>);})}</tbody></table>
+      :<div className="empty">No {filter==='all'?'':TX_TYPES[filter]?'':''}transactions for {year} yet. Hit <b>Upload receipt</b> or <b>Add transaction</b> to start the books.</div>}
+    </div>
+    {edit&&<TxnModal txn={edit.txn} file={edit.file} onSave={t=>{upsertTxn(t);setEdit(null);}} onDelete={t=>{deleteTxn(t);setEdit(null);}} onClose={()=>setEdit(null)}/>}
+  </>);
+}
+
+function TxnModal({txn,file,onSave,onDelete,onClose}){
+  const [d,setD]=useState(txn?{...txn}:{id:uid(),type:file?'expense':'expense',date:todayISO(),amount:'',category:'',party:'',method:'Card',who:'Business',notes:'',receipt:null,createdAt:new Date().toISOString()});
+  const [ai,setAi]=useState(null); // null | reading | done | off
+  const [saving,setSaving]=useState(false);
+  const set=p=>setD(x=>({...x,...p}));
+  useEffect(()=>{ if(!file||txn) return; let go=true; (async()=>{ setAi('reading');
+    try{ const b64=await toB64(file); const r=await fetch('/api/parse-receipt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({file:b64,mime:file.type})}); const j=await r.json();
+      if(go&&j&&j.ok&&j.fields){ const f=j.fields; setD(x=>({...x,type:'expense',party:f.vendor||x.party,date:f.date||x.date,amount:f.total||x.amount,category:f.category||x.category,notes:f.summary||x.notes})); setAi('done'); }
+      else if(go){ setAi('off'); } }
+    catch(e){ if(go)setAi('off'); } })(); return ()=>{go=false;}; },[]);
+  const cats=(d.type==='income'||d.type==='contribution')?INC_CATS:EXP_CATS;
+  const showCat=d.type==='income'||d.type==='expense';
+  const save=async()=>{
+    let receipt=d.receipt||null;
+    if(file){ setSaving(true);
+      const yr=(d.date||todayISO()).slice(0,4);
+      const safe=(file.name||'receipt.pdf').replace(/[^\w.\-]+/g,'_');
+      const path=`${yr}/${d.id}-${safe}`;
+      try{ if(typeof db.uploadReceipt==='function'){ await db.uploadReceipt(path,file); receipt={path,name:file.name||safe,uploadedAt:new Date().toISOString()}; } }
+      catch(e){ window.alert('Transaction saved — but the receipt file could not be stored yet. Finish the one-time Storage setup, then re-upload this receipt. ('+(e.message||e)+')'); }
+      setSaving(false);
+    }
+    onSave({...d,amount:num(d.amount),receipt});
+  };
+  return (<div className="scrim2" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal" style={{maxWidth:560}} onMouseDown={e=>e.stopPropagation()}>
+      <div className="m-head"><div><h2>{txn?'Edit transaction':'New transaction'}</h2><div className="meta">The Books</div></div><button className="m-x" onClick={onClose}><X size={18}/></button></div>
+      <div style={{padding:'4px 22px 22px'}}>
+        {ai==='reading'&&<div className="ai-banner ai-reading"><Loader2 size={15} className="spin"/>Reading the receipt…</div>}
+        {ai==='done'&&<div className="ai-banner ai-done"><Sparkles size={15}/>Filled in from your receipt — review and tweak below.</div>}
+        {ai==='off'&&<div className="ai-banner ai-off"><AlertTriangle size={15}/>AI read-back isn't on yet — type the details (your file is still attached). </div>}
+        <div className="fgrid">
+          <div className="field"><label>Type</label><select value={d.type} onChange={e=>set({type:e.target.value})}>{Object.entries(TX_TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></div>
+          <div className="field"><label>Amount</label><input type="number" inputMode="decimal" value={d.amount} onChange={e=>set({amount:e.target.value})} placeholder="0.00"/></div>
+          <div className="field"><label>Date</label><input type="date" value={d.date||''} onChange={e=>set({date:e.target.value})}/></div>
+          {showCat&&<div className="field"><label>Category</label><select value={d.category||''} onChange={e=>set({category:e.target.value})}><option value="">— pick —</option>{cats.map(c=><option key={c} value={c}>{c}</option>)}</select></div>}
+          <div className="field"><label>{TX_TYPES[d.type]?.dir==='in'?'Source':'Vendor'}</label><input value={d.party||''} onChange={e=>set({party:e.target.value})} placeholder={TX_TYPES[d.type]?.dir==='in'?'Who paid you':'Who you paid'}/></div>
+          <div className="field"><label>Method</label><select value={d.method||'Card'} onChange={e=>set({method:e.target.value})}>{TX_METHODS.map(m=><option key={m} value={m}>{m}</option>)}</select></div>
+          <div className="field"><label>Who</label><select value={d.who||'Business'} onChange={e=>set({who:e.target.value})}>{TX_WHO.map(w=><option key={w} value={w}>{w}</option>)}</select></div>
+          <div className="field full"><label>Notes</label><input value={d.notes||''} onChange={e=>set({notes:e.target.value})} placeholder="What was this for?"/></div>
+        </div>
+        {file&&<div className="rcfile"><Paperclip size={14}/>{file.name}<span style={{marginLeft:'auto',color:'#8b88a0'}}>will be saved with this entry</span></div>}
+        {!file&&d.receipt&&<div className="rcfile"><Paperclip size={14}/>{d.receipt.name}<span style={{marginLeft:'auto',color:'#8b88a0'}}>receipt on file</span></div>}
+        <div style={{display:'flex',gap:8,marginTop:16,alignItems:'center'}}>
+          <button className="btn btn-p" disabled={saving} onClick={save}>{saving?<Loader2 size={15} className="spin"/>:<CheckCircle2 size={15}/>}Save</button>
+          {txn&&<button className="btn btn-d btn-sm" onClick={()=>{if(window.confirm('Delete this transaction?'))onDelete(txn);}}><Trash2 size={14}/>Delete</button>}
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
+const ACT_COLORS={Booked:'#E0662B',Call:'#2B4DE0',Text:'#1F9D55',Meeting:'#7A5CC8',Note:'#C8A24A',Email:'#D14343',Task:'#0E9AA7'};
+const ACT_ORDER=['Booked','Call','Text','Meeting','Note','Email','Task'];
+const ACT_ICON={Booked:CalendarCheck,Note:StickyNote,Call:PhoneCall,Text:MessageSquare,Meeting:CalendarClock,Email:Mailbox,Task:ListTodo};
+function Activity({leads,tasks,me,open}){
+  const [mode,setMode]=useState('day');
+  const [anchor,setAnchor]=useState(todayISO());
+  const [who,setWho]=useState('All');
+  const [typeF,setTypeF]=useState('All');
+  const range=useMemo(()=>{
+    const d=new Date(anchor+'T00:00:00'); let start,end,label;
+    if(mode==='day'){ start=new Date(d); end=new Date(d); label=d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}); }
+    else if(mode==='week'){ const dow=d.getDay(); start=new Date(d); start.setDate(d.getDate()-dow); end=new Date(start); end.setDate(start.getDate()+6); label=start.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' – '+end.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+    else { start=new Date(d.getFullYear(),d.getMonth(),1); end=new Date(d.getFullYear(),d.getMonth()+1,0); label=d.toLocaleDateString(undefined,{month:'long',year:'numeric'}); }
+    start.setHours(0,0,0,0); end.setHours(23,59,59,999); return {start,end,label};
+  },[mode,anchor]);
+  const all=useMemo(()=>{
+    const acts=leads.flatMap(l=>(l.activities||[]).map(a=>({...a,leadId:l.id,leadName:l.name,company:l.company})));
+    /* completed tasks count as work done — fold them into the same feed */
+    const done=(tasks||[]).filter(t=>t.done).map(t=>{
+      /* Tasks completed before we started stamping doneAt have no completion time.
+         Fall back to the best real date the task already carries (due, then created)
+         so they still show — flagged approximate rather than invented. */
+      const stamp=t.doneAt || t.createdAt || '';
+      if(!stamp) return null;
+      const l=leads.find(x=>x.id===t.leadId);
+      return {id:'task-'+t.id,ts:stamp,type:'Task',text:t.title||'(untitled task)',
+        who:t.doneBy||(t.owner&&t.owner!=='Both'?t.owner:'—'),
+        leadId:t.leadId||'',leadName:l?l.name:'',company:l?l.company:'',isTask:true,approx:!t.doneAt};
+    }).filter(Boolean);
+    return [...acts,...done];
+  },[leads,tasks]);
+  const inRange=useMemo(()=>all.filter(a=>{const t=new Date(a.ts);return t>=range.start&&t<=range.end;}),[all,range]);
+  const people=useMemo(()=>{const s=new Set(inRange.map(a=>a.who||'—'));BRAND.team.forEach(p=>s.add(p));return [...s].filter(Boolean).sort();},[inRange]);
+  /* the person filter drives the WHOLE tab — KPIs, chart, matrix and log */
+  const scope=useMemo(()=>inRange.filter(a=>who==='All'||a.who===who),[inRange,who]);
+  const shown=scope.filter(a=>typeF==='All'||a.type===typeF).sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
+  const matrix=useMemo(()=>{const m={};const zero=()=>ACT_ORDER.reduce((o,k)=>(o[k]=0,o),{total:0});scope.forEach(a=>{const p=a.who||'—';m[p]=m[p]||zero();if(m[p][a.type]!=null)m[p][a.type]++;m[p].total++;});return m;},[scope]);
+  const chartData=Object.entries(matrix).map(([person,c])=>({person,...c})).sort((a,b)=>b.total-a.total);
+  const totals=ACT_ORDER.reduce((o,t)=>{o[t]=scope.filter(a=>a.type===t).length;return o;},{});
+  const grand=scope.length;
+  const shift=dir=>{const d=new Date(anchor+'T00:00:00');if(mode==='day')d.setDate(d.getDate()+dir);else if(mode==='week')d.setDate(d.getDate()+7*dir);else d.setMonth(d.getMonth()+dir);setAnchor(d.toISOString().slice(0,10));};
+  const fmtTime=ts=>{try{return new Date(ts).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}catch{return '';}};
+  const dayHead=ts=>new Date(ts).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+  const kIcon=t=>{const I=ACT_ICON[t];return I?React.createElement(I,{size:14}):null;};
+  let lastDay=null;
+  return (<>
+    <div className="card" style={{marginBottom:16}}>
+      <div className="act-ctrl">
+        <div className="seg">{[['day','Day'],['week','Week'],['month','Month']].map(([k,l])=><button key={k} className={mode===k?'on':''} onClick={()=>setMode(k)}>{l}</button>)}</div>
+        <div className="act-nav"><button className="iconbtn" onClick={()=>shift(-1)}><ChevronLeft size={16}/></button><b>{range.label}</b><button className="iconbtn" onClick={()=>shift(1)}><ChevronRight size={16}/></button></div>
+        <input type="date" value={anchor} onChange={e=>setAnchor(e.target.value)} style={{padding:'7px 10px',border:'1px solid #E1E2EC',borderRadius:9,fontSize:13,color:INK}}/>
+        <button className="btn btn-s btn-sm" style={{marginLeft:'auto'}} onClick={()=>{setMode('day');setAnchor(todayISO());}}>Today</button>
+      </div>
+      <div className="bk-filters" style={{margin:0}}>
+        <button className={'bk-chip'+(who==='All'?' on':'')} onClick={()=>setWho('All')}>Everyone</button>
+        {people.map(p=><button key={p} className={'bk-chip'+(who===p?' on':'')} onClick={()=>setWho(p)}>{p}</button>)}
+        <span style={{width:1,height:22,background:'#E4E5EE',margin:'0 4px'}}/>
+        <button className={'bk-chip'+(typeF==='All'?' on':'')} onClick={()=>setTypeF('All')}>All types</button>
+        {ACT_ORDER.map(t=><button key={t} className={'bk-chip'+(typeF===t?' on':'')} onClick={()=>setTypeF(t)}>{t}</button>)}
+      </div>
+    </div>
+    <div className="kpis">
+      <Kpi variant="accent" label="Total logged" value={grand} icon={<List size={14}/>} d={(who==='All'?'Everyone':who)+' · '+range.label}/>
+      {ACT_ORDER.map(t=><Kpi key={t} variant={t==='Booked'?'accent':undefined} label={actPlural(t)} value={totals[t]} icon={kIcon(t)}/>)}
+    </div>
+    {chartData.length>0&&<div className="card" style={{marginBottom:16}}>
+      <div className="ch-title">Activity by person</div>
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={chartData} margin={{top:8,right:8,left:-14,bottom:0}}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F5" vertical={false}/>
+          <XAxis dataKey="person" tick={{fontSize:12,fill:'#6a6788'}}/>
+          <YAxis allowDecimals={false} tick={{fontSize:12,fill:'#9b98ad'}}/>
+          <Tooltip/>
+          <Legend wrapperStyle={{fontSize:12}}/>
+          {ACT_ORDER.map(t=><Bar key={t} dataKey={t} stackId="a" fill={ACT_COLORS[t]} radius={t==='Email'?[4,4,0,0]:0}/>)}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>}
+    {chartData.length>0&&<div className="card" style={{marginBottom:16}}>
+      <table className="tbl"><thead><tr><th>Person</th>{ACT_ORDER.map(t=><th key={t} style={{textAlign:'right'}}>{t}</th>)}<th style={{textAlign:'right'}}>Total</th></tr></thead>
+      <tbody>{chartData.map(r=>(<tr key={r.person}><td className="namecell">{r.person}</td>{ACT_ORDER.map(t=><td key={t} style={{textAlign:'right'}} className="subcell">{r[t]||0}</td>)}<td style={{textAlign:'right',fontWeight:800,color:INK}}>{r.total}</td></tr>))}</tbody></table>
+    </div>}
+    <div className="card">
+      <div className="ch-title">Log · {shown.length} {shown.length===1?'entry':'entries'}</div>
+      {shown.length?<div className="act-feedlist">{shown.map(a=>{const Ic=ACT_ICON[a.type]||StickyNote;const dk=(a.ts||'').slice(0,10);const head=mode!=='day'&&dk!==lastDay;lastDay=dk;return(
+        <React.Fragment key={a.id}>
+          {head&&<div className="act-daysep">{dayHead(a.ts)}</div>}
+          <div className="act-row" onClick={()=>open&&open(a.leadId)}>
+            <div className="act-ic" style={{background:ACT_COLORS[a.type]||'#8b88a0'}}><Ic size={15}/></div>
+            <div className="act-body">
+              <div className="act-top"><span className="act-lead">{a.leadName||'—'}</span><span className="act-who">{a.who||'—'}</span><span className="act-time" title={a.approx?'Completed before we tracked exact times — showing its due date':undefined}>{a.approx?'~':''}{fmtTime(a.ts)}</span></div>
+              <div className="act-txt">{a.text}</div>
+            </div>
+          </div>
+        </React.Fragment>);})}</div>
+      :<div className="empty">No activity logged for {mode==='day'?'this day':'this '+mode}{who!=='All'?' by '+who:''}{typeF!=='All'?' · '+typeF:''}. Log calls, texts &amp; meetings from any lead and they'll show up here.</div>}
+    </div>
+  </>);
+}
+
+/* ===================== TEAM (manager-only; access enforced in Postgres) ===================== */
+function Team({users,me,meUser,multiUser,sessionUid,sessionEmail,pools,onAdd,onUpdate,onRemove,onBootstrapSelf,onBackfill,leadCount}){
+  const [name,setName]=useState(''); const [email,setEmail]=useState(''); const [role,setRole]=useState('officer'); const [poolStr,setPoolStr]=useState('');
+  const [busy,setBusy]=useState(false); const [err,setErr]=useState(''); const [msg,setMsg]=useState('');
+  const [bootName,setBootName]=useState('');
+  const add=async()=>{ setErr(''); setMsg(''); if(!email.trim()){setErr('Enter a work email.');return;} setBusy(true);
+    try{ await onAdd({name:name.trim(),email:email.trim(),role,pools:poolStr.split(',').map(s=>s.trim()).filter(Boolean)}); setName('');setEmail('');setPoolStr('');setRole('officer'); setMsg('Added '+email.trim()+' — they’ll get a set-password email.'); }
+    catch(e){ setErr(e.message||'Could not add that person.'); } setBusy(false); };
+  const boot=async()=>{ setErr('');setMsg('');setBusy(true); try{ await onBootstrapSelf(bootName.trim()); setMsg('You’re now the manager. Add your team below.'); }catch(e){ setErr(e.message||'Could not enable multi-user.'); } setBusy(false); };
+  const backfill=async()=>{ setErr('');setMsg('');setBusy(true); try{ const r=await onBackfill(); setMsg(`Backfill done — ${r.matched} lead${r.matched===1?'':'s'} matched to a user by name; ${r.unmatched} unmatched (manager-only until assigned).`); }catch(e){ setErr(e.message||'Backfill failed.'); } setBusy(false); };
+  const setUserPools=(u,str)=>onUpdate({...u,pools:str.split(',').map(s=>s.trim()).filter(Boolean)});
+  return (<>
+    {!multiUser&&(<div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Users size={15}/>Enable multi-user</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Right now this CRM runs single-tenant — everyone signed in sees everything, which is fine for one or two partners. Enabling multi-user makes you the first <b>manager</b> and turns on database-enforced access: officers you add see only their own leads plus the pools you assign. Your {leadCount} existing lead{leadCount===1?'':'s'} {leadCount===1?'is':'are'} untouched.</div>
+      <div className="addrow"><input placeholder="Your name (exactly as it appears as an owner on leads)" value={bootName} onChange={e=>setBootName(e.target.value)}/><button className="btn btn-p" disabled={busy} onClick={boot}><UserCheck size={15}/>Make me the manager</button></div>
+      <div className="ch-sub" style={{marginTop:10,marginBottom:0}}>Requires <b>MIGRATION.sql</b> to have been run on this Supabase project first (it creates the <code>crm_users</code> table and the row-level policies).</div>
+      {err&&<div className="gate-err" style={{marginTop:10}}>{err}</div>}
+      {msg&&<div className="ch-sub" style={{marginTop:10,color:GREEN,fontWeight:600}}>{msg}</div>}
+    </div>)}
+
+    {multiUser&&<><div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Users size={15}/>People</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Managers read and write everything and manage this list. Officers see only leads they own plus leads in a pool assigned to them — enforced in Postgres, not just hidden in the UI. Pools are comma-separated labels.</div>
+      <div className="team-list">
+        {users.map(u=>{ const meRow=u.id===sessionUid;
+          return (<div className="team-row" key={u.id} style={{flexWrap:'wrap',gap:8}}>
+            <span className="team-av">{(u.name||'?')[0]}</span>
+            <span className="team-name">{u.name}{meRow?' (you)':''}</span>
+            <select className="selctl" value={u.role} onChange={e=>onUpdate({...u,role:e.target.value})}>
+              <option value="manager">Manager</option><option value="officer">Officer</option>
+            </select>
+            <input className="selctl" style={{flex:1,minWidth:150}} placeholder="pools (comma-separated)" defaultValue={(u.pools||[]).join(', ')} onBlur={e=>setUserPools(u,e.target.value)}/>
+            <button className="btn btn-d btn-sm" disabled={meRow} title={meRow?'You can’t remove yourself':'Remove'} onClick={()=>{ if(window.confirm(`Remove ${u.name}? Their login stays in Supabase Auth but they lose all CRM access.`)) onRemove(u.id); }}><Trash2 size={14}/></button>
+          </div>); })}
+        {!users.length&&<div className="empty" style={{textAlign:'left'}}>No one yet.</div>}
+      </div>
+    </div>
+
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><UserPlus size={15}/>Add a person</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>They sign in with their real work email. We create their login and send a set-password email. {pools.length?`Known pools: ${pools.join(', ')}.`:'Pools are any label you like (a team or territory) — type them comma-separated.'}</div>
+      <div className="fgrid">
+        <div className="field"><label>Name</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="Jordan Blake"/></div>
+        <div className="field"><label>Work email</label><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="jordan@lender.com"/></div>
+        <div className="field"><label>Role</label><select value={role} onChange={e=>setRole(e.target.value)}><option value="officer">Officer</option><option value="manager">Manager</option></select></div>
+        <div className="field"><label>Pools (comma-separated)</label><input value={poolStr} onChange={e=>setPoolStr(e.target.value)} placeholder="e.g. Purchase, Refi"/></div>
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',marginTop:12,flexWrap:'wrap'}}>
+        <button className="btn btn-p" disabled={busy} onClick={add}>{busy?<Loader2 size={15} className="spin"/>:<UserPlus size={15}/>}Add &amp; send invite</button>
+        <button className="btn btn-g" disabled={busy} onClick={backfill} title="Map existing leads' owner names to these users, filling owner_id">Backfill owner IDs from names</button>
+      </div>
+      {err&&<div className="gate-err" style={{marginTop:10}}>{err}</div>}
+      {msg&&<div className="ch-sub" style={{marginTop:10,color:GREEN,fontWeight:600}}>{msg}</div>}
+    </div></>}
+  </>);
+}
+
+function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoices,gcal,onDisconnectGcal,refreshGcal,applyPreset}){
+  const onLogo=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>saveSettings({...settings,logo:r.result});r.readAsDataURL(f);};
+  const setOptions=(key,arr)=>saveSettings({...settings,options:{...settings.options,[key]:arr}});
+  const exportAll=()=>{const data={app:'proytech-crm',version:4,exportedAt:new Date().toISOString(),leads,settings,invoices};const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=`proytech-crm-backup-${todayISO()}.json`;a.click();URL.revokeObjectURL(u);};
+  const importAll=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!d.leads)throw 0;if(window.confirm(`Restore ${d.leads.length} leads from this backup? This replaces everything currently in the CRM.`)){saveLeads(d.leads);if(d.settings)saveSettings({logo:d.settings.logo||'',logoSize:d.settings.logoSize||34,options:{...DEFAULT_OPTIONS,...(d.settings.options||{})},stages:d.settings.stages?.length?d.settings.stages:LENDER_STAGES,customFields:d.settings.customFields||[],team:d.settings.team||DEFAULT_TEAM,clientPhases:d.settings.clientPhases||LENDER_CLIENT_PHASES,onboardingItems:Array.isArray(d.settings.onboardingItems)&&d.settings.onboardingItems.length?d.settings.onboardingItems:LENDER_ONB_ITEMS,preset:d.settings.preset||'lender',comp:{...DEFAULT_COMP,...(d.settings.comp||{})},goals:{...DEFAULT_GOALS,...(d.settings.goals||{})},huddle:d.settings.huddle||null,modules:Array.isArray(d.settings.modules)?d.settings.modules:presetSettingsPatch(PRESETS.lender).modules,leadColumns:d.settings.leadColumns||DEFAULT_LEAD_COLS,deliveryTracks:d.settings.deliveryTracks?.length?d.settings.deliveryTracks:LENDER_DELIVERY_TRACKS,invoicing:{...DEFAULT_INVOICING,...(d.settings.invoicing||{}),biz:{...DEFAULT_INVOICING.biz,...((d.settings.invoicing||{}).biz||{})}}});if(saveInvoices)saveInvoices(Array.isArray(d.invoices)?d.invoices:[]);window.alert('Backup restored.');}}catch(err){window.alert('That file is not a valid ProyTech backup.');}};r.readAsText(f);e.target.value='';};
+
+  return (<>
+    {/* team access */}
+    {(()=>{ const people=(settings.options?.owner||OWNERS).filter(o=>o!==POOL_OWNER);
+      const setAccess=(name,access)=>{ const t=(settings.team||[]).filter(x=>x.name!==name); saveSettings({...settings,team:[...t,{name,access}]}); };
+      return (<div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Users size={15}/>Team &amp; lead visibility</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Everyone lands on <b>their own</b> leads by default. This controls whether they can switch to <b>All</b> and see the whole company's list. Leads owned by <b>{POOL_OWNER}</b> sit in the shared <b>Pool</b> — anyone can see and claim those.</div>
+      <div className="team-list">
+        {people.map(p=>{const a=teamAccess(settings,p);return (<div className="team-row" key={p}>
+          <span className="team-av">{p[0]}</span>
+          <span className="team-name">{p}</span>
+          <div className="seg team-seg">
+            <button className={a==='own'?'on':''} onClick={()=>setAccess(p,'own')}>Own + Pool</button>
+            <button className={a==='all'?'on':''} onClick={()=>setAccess(p,'all')}>Everything</button>
+          </div>
+        </div>);})}
+        {!people.length&&<div className="empty" style={{textAlign:'left',padding:'8px 0'}}>No owners yet — add one below.</div>}
+      </div>
+      <OwnerAdd existing={people} onAdd={name=>setOptions('owner',[...(settings.options?.owner||OWNERS).filter(o=>o!==name),name])}/>
+      <div className="ch-sub" style={{marginTop:10,marginBottom:0}}>New owners can also be picked as a lead's owner everywhere. Give someone <b>Own + Pool</b> and they'll only ever see their own leads plus the shared pool.</div>
+    </div>); })()}
+
+    {/* monthly goals */}
+    {(()=>{ const G=goalsOf(settings);
+      const setGoal=(k,v)=>saveSettings({...settings,goals:{...G,[k]:Math.max(0,num(v))}});
+      const anySet=Object.values(G).some(v=>num(v)>0);
+      return (<div className="card" style={{marginBottom:18}}>
+        <div className="sec-title"><Target size={15}/>Monthly goals</div>
+        <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Set a target and the matching dashboard tile grows a progress bar that tells you if you’re on pace for the month. Leave one at 0 to hide it.</div>
+        <div className="goal-grid">{GOAL_FIELDS.map(([k,label,note,kind])=>(
+          <div className="goal-row" key={k}>
+            <div className="goal-l"><b>{label}</b><span>{note}</span></div>
+            <div className="goal-in">{kind==='$'&&<i>$</i>}<input type="number" min="0" value={G[k]||''} placeholder="0" onChange={e=>setGoal(k,e.target.value)}/></div>
+          </div>))}</div>
+        {!anySet&&<div className="subcell" style={{marginTop:10}}>No goals set yet — tiles show plain numbers until you add one.</div>}
+      </div>); })()}
+
+    {/* compensation */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Users size={15}/>Your Plan &amp; Seats</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>This CRM is set up for a single loan officer. Need to track another officer? Add a seat for <b>$25/mo</b> and they get their own login and pipeline.</div>
+      <a className="btn btn-p" href={`mailto:gvonflue@gmail.com?subject=${encodeURIComponent('Triple J Mortgage — request an additional seat')}&body=${encodeURIComponent("Hi Garrett,\n\nI'd like to add another seat ($25/mo) to my ProyTech Business Suite CRM.\n\nOfficer name:\nOfficer email:\n\nThanks,\nJesse")}`} style={{textDecoration:'none',display:'inline-flex'}}>Request a seat ($25/mo)</a>
+    </div>
+    {(()=>{ const comp=compOf(settings);
+      const setComp=patch=>saveSettings({...settings,comp:{...comp,...patch}});
+      const example=400000*num(comp.pct)/100+num(comp.flat);
+      return (<div className="card" style={{marginBottom:18}}>
+        <div className="sec-title"><Percent size={15}/>Compensation — default rate</div>
+        <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>The <b>default</b> commission for new loans, so the dashboard can project your income. Commission = <b>loan amount × percent</b> plus any flat amount per funded loan. Any single loan can override this on its own record (for a rate that changes mid-year). (100 basis points = 1%.)</div>
+        <div className="fgrid">
+          <div className="field"><label>Commission — % of loan amount</label><div className="goal-in" style={{maxWidth:180}}><input type="number" step="0.001" min="0" value={comp.pct} onChange={e=>setComp({pct:Math.max(0,num(e.target.value))})}/><i style={{right:12,left:'auto'}}>%</i></div></div>
+          <div className="field"><label>Flat amount per funded loan ($)</label><input type="number" min="0" value={comp.flat} onChange={e=>setComp({flat:Math.max(0,num(e.target.value))})}/></div>
+        </div>
+        <div className="subcell" style={{marginTop:10}}>Example — a {usd(400000)} loan at {num(comp.pct)}%{num(comp.flat)>0?` + ${usd(comp.flat)}`:''} pays you <b style={{color:INK}}>{usd(example)}</b>. Pipeline projections on the dashboard use this.</div>
+      </div>); })()}
+
+    {/* modules */}
+    {(()=>{ const on=modList(settings); const locked=lockedModules(settings);
+      const rows=ALL_MODULES.filter(([k])=>!locked.includes(k));   // locked modules aren't offered at all
+      const toggle=k=>{ const next=on.includes(k)?on.filter(x=>x!==k):[...on,k]; saveSettings({...settings,modules:next}); };
+      return (<div className="card" style={{marginBottom:18}}>
+        <div className="sec-title"><LayoutDashboard size={15}/>Sections</div>
+        <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Switch off anything this install doesn’t need — it disappears from the sidebar. Dashboard and Settings always stay.{locked.length?' Invoicing and The Books aren’t part of the lender build.':''}</div>
+        <div className="mod-grid">{rows.map(([k,label])=>(
+          <label key={k} className={'mod-row'+(on.includes(k)?' on':'')}>
+            <input type="checkbox" checked={on.includes(k)} onChange={()=>toggle(k)}/>
+            <span>{label}</span>
+            {on.includes(k)?<CheckCircle2 size={15} color={GREEN}/>:<Circle size={15} color="#C9C5D9"/>}
+          </label>))}</div>
+        <div className="subcell" style={{marginTop:10}}>{on.filter(k=>!locked.includes(k)).length} of {rows.length} sections on. Data is never deleted — switching a section back on brings everything with it.</div>
+      </div>); })()}
+
+    {/* google calendar */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><CalendarClock size={15}/>Google Calendar</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Connect a Google account so meetings you book on a lead post automatically to that calendar. Use <b>admin@getproytech.com</b> when the Google sign-in appears.</div>
+      {gcal&&gcal.connected
+        ? <div className="gcal-on"><div className="gcal-dot"/><div><b>Connected{gcal.email?` — ${gcal.email}`:''}</b><div className="subcell">Meetings booked on a lead land here automatically.</div></div><button className="btn btn-g btn-sm" style={{marginLeft:'auto'}} onClick={onDisconnectGcal}>Disconnect</button></div>
+        : <div className="gcal-off"><button className="btn btn-p" onClick={()=>{window.location.href='/api/google-auth';}}><CalendarClock size={15}/>Connect Google Calendar</button><span className="subcell">You’ll approve once, then you’re set.</span></div>}
+    </div>
+
+    {/* client phases */}
+    {(()=>{ const phases=stdPhases(settings);
+      const savePhases=next=>saveSettings({...settings,clientPhases:next});
+      const patch=(i,p)=>{const n=phases.map((x,j)=>j===i?{...x,...p}:x);savePhases(n);};
+      const move=(i,dir)=>{const j=i+dir;if(j<0||j>=phases.length)return;const n=phases.slice();[n[i],n[j]]=[n[j],n[i]];savePhases(n);};
+      return (<div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><KanbanSquare size={15}/>Loan phases</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>These are the columns on the loan pipeline board (Processing → Closed). Rename, recolor, or reorder them. The keys stay fixed because the loan checklist maps to them — for one-off steps, add a <b>custom phase</b> on an individual loan from the Loans tab.</div>
+      <div className="phase-editor">{phases.map((p,i)=>(<div className="phase-row" key={p.key}>
+        <input type="color" value={p.color} onChange={e=>patch(i,{color:e.target.value})}/>
+        <input className="phase-label" value={p.label} onChange={e=>patch(i,{label:e.target.value})}/>
+        <span className="phase-key">{p.flow?'flow':'terminal'}</span>
+        <div className="phase-moves">
+          <button className="m-x" style={{width:26,height:26}} disabled={i===0} onClick={()=>move(i,-1)}><ChevronUp size={13}/></button>
+          <button className="m-x" style={{width:26,height:26}} disabled={i===phases.length-1} onClick={()=>move(i,1)}><ChevronDown size={13}/></button>
+        </div>
+      </div>))}</div>
+      <button className="linkbtn" onClick={()=>savePhases(DEFAULT_CLIENT_PHASES)}>Reset to defaults</button>
+    </div>); })()}
+
+    {/* client checklist */}
+    {(()=>{ const items=onbItemsOf(settings); const phases=stdPhases(settings);
+      const saveItems=next=>saveSettings({...settings,onboardingItems:next});
+      const patch=(i,p)=>saveItems(items.map((x,j)=>j===i?{...x,...p}:x));
+      const move=(i,dir)=>{const j=i+dir;if(j<0||j>=items.length)return;const n=items.slice();[n[i],n[j]]=[n[j],n[i]];saveItems(n);};
+      const del=i=>{ if(!window.confirm('Remove this checklist item? Completed history on existing clients is kept — the item just stops showing.')) return; saveItems(items.filter((_,j)=>j!==i)); };
+      const add=()=>saveItems([...items,{key:'ob_'+uid(),label:'New item',phase:(phases[0]&&phases[0].key)||'intake'}]);
+      return (<div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><ListTodo size={15}/>Loan checklist</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>The steps every loan file works through, each tied to a loan phase (Processing → Closed). Add, rename, re-phase, reorder, or remove them — this is the checklist that shows on the Loans tab and drives phase progress. Removing an item never deletes a loan's history; it just stops rendering.</div>
+      <div>{items.map((it,i)=>(<div key={it.key} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+        <input className="phase-label" style={{flex:1,minWidth:120,padding:'8px 10px',border:'1px solid #DEDFEA',borderRadius:8,fontSize:13.5,fontFamily:'Inter'}} value={it.label} onChange={e=>patch(i,{label:e.target.value})}/>
+        <select className="selctl" value={it.phase} onChange={e=>patch(i,{phase:e.target.value})}>{phases.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}{!phases.some(p=>p.key===it.phase)&&<option value={it.phase}>{it.phase}</option>}</select>
+        <button className="m-x" style={{width:26,height:26}} disabled={i===0} onClick={()=>move(i,-1)}><ChevronUp size={13}/></button>
+        <button className="m-x" style={{width:26,height:26}} disabled={i===items.length-1} onClick={()=>move(i,1)}><ChevronDown size={13}/></button>
+        <button className="m-x" style={{width:26,height:26}} onClick={()=>del(i)} title="Delete item"><Trash2 size={13}/></button>
+      </div>))}</div>
+      <div style={{display:'flex',gap:14,marginTop:12,flexWrap:'wrap',alignItems:'center'}}>
+        <button className="btn btn-g btn-sm" onClick={add}><Plus size={14}/>Add checklist item</button>
+        <button className="linkbtn" onClick={()=>{if(window.confirm('Reset the checklist to the 27-item default? Existing client history is kept.'))saveItems(DEFAULT_ONB_ITEMS);}}>Reset to defaults</button>
+        <span className="subcell" style={{marginLeft:'auto'}}>{items.length} item{items.length===1?'':'s'}</span>
+      </div>
+    </div>); })()}
+
+    {/* logo */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><ImageIcon size={15}/>Brand / Logo</div>
+      {settings.logo&&<div style={{marginBottom:14,padding:'16px',background:INK,borderRadius:12,display:'inline-block'}}><img src={settings.logo} alt="logo" style={{maxHeight:(settings.logoSize||34),maxWidth:(settings.logoSize||34)*5,objectFit:'contain',display:'block'}}/></div>}
+      <label className="logo-drop"><ImageIcon size={22} style={{marginBottom:6}}/><div style={{fontWeight:600}}>{settings.logo?'Replace logo':'Upload your ProyTech logo'}</div><div style={{fontSize:12,marginTop:4}}>PNG or SVG, transparent background ideal</div><input type="file" accept="image/*" onChange={onLogo} style={{display:'none'}}/></label>
+      {settings.logo&&<div className="logosize">
+        <div className="logosize-h"><span>Logo size</span><b>{settings.logoSize||34}px</b></div>
+        <input type="range" min="20" max="90" step="1" value={settings.logoSize||34} onChange={e=>saveSettings({...settings,logoSize:Number(e.target.value)})}/>
+      </div>}
+      {settings.logo&&<button className="btn btn-d" style={{marginTop:12}} onClick={()=>saveSettings({...settings,logo:''})}><Trash2 size={15}/>Remove logo</button>}
+    </div>
+
+    {/* invoicing defaults — not part of the lender build */}
+    {!lockedModules(settings).includes('invoices')&&(()=>{ const iv=settings.invoicing||DEFAULT_INVOICING; const biz=iv.biz||DEFAULT_INVOICING.biz; const setIv=patch=>saveSettings({...settings,invoicing:{...iv,...patch}}); const setBiz=patch=>setIv({biz:{...biz,...patch}});
+      return (<div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Receipt size={15}/>Invoicing</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Your business details and defaults. These fill in automatically on every new invoice.</div>
+      <div className="fgrid">
+        <div className="field"><label>Business name</label><input value={biz.name||''} onChange={e=>setBiz({name:e.target.value})}/></div>
+        <div className="field"><label>Email</label><input value={biz.email||''} onChange={e=>setBiz({email:e.target.value})}/></div>
+        <div className="field full"><label>Business address</label><textarea rows={2} value={biz.address||''} onChange={e=>setBiz({address:e.target.value})}/></div>
+        <div className="field"><label>Invoice prefix</label><input value={iv.prefix||''} onChange={e=>setIv({prefix:e.target.value})}/></div>
+        <div className="field"><label>Next invoice #</label><input type="number" value={iv.seq||1} onChange={e=>setIv({seq:Math.max(1,Math.round(num(e.target.value)))})}/></div>
+        <div className="field"><label>Payment terms (days)</label><input type="number" value={iv.terms??14} onChange={e=>setIv({terms:Math.round(num(e.target.value))})}/></div>
+        <div className="field"><label>Default tax rate (%)</label><input type="number" value={iv.taxRate??0} onChange={e=>setIv({taxRate:num(e.target.value)})}/></div>
+        <div className="field full"><label>Payment link (Stripe / PayPal / etc.)</label><input placeholder="https://…" value={iv.paymentLink||''} onChange={e=>setIv({paymentLink:e.target.value})}/></div>
+        <div className="field full"><label>Default notes / terms</label><textarea rows={2} value={iv.notes||''} onChange={e=>setIv({notes:e.target.value})}/></div>
+      </div>
+      <div className="ch-sub" style={{margin:'18px 0 12px',fontWeight:700,color:INK,textTransform:'uppercase',letterSpacing:'.05em',fontSize:11}}>Invoice design</div>
+      <div className="fgrid">
+        <div className="field"><label>Brand accent color</label><div className="acc-row"><input type="color" value={iv.accent||'#2B4DE0'} onChange={e=>setIv({accent:e.target.value})}/><input value={iv.accent||'#2B4DE0'} onChange={e=>setIv({accent:e.target.value})}/></div></div>
+        <div className="field"><label>Invoice logo size — {iv.logoH||46}px</label><input type="range" className="invrange" min="24" max="80" value={iv.logoH||46} onChange={e=>setIv({logoH:Number(e.target.value)})}/></div>
+      </div>
+      <div className="inv-toggles">
+        <label className="invtog"><input type="checkbox" checked={iv.showLogo!==false} onChange={e=>setIv({showLogo:e.target.checked})}/>Show logo</label>
+        <label className="invtog"><input type="checkbox" checked={iv.showNotes!==false} onChange={e=>setIv({showNotes:e.target.checked})}/>Show notes / terms</label>
+        <label className="invtog"><input type="checkbox" checked={iv.showPay!==false} onChange={e=>setIv({showPay:e.target.checked})}/>Show payment link</label>
+      </div>
+      <div className="ch-sub" style={{margin:'20px 0 8px',fontWeight:700,color:INK,textTransform:'uppercase',letterSpacing:'.05em',fontSize:11}}>Page layout &amp; text sizes</div>
+      <div className="ch-sub" style={{marginTop:-2,marginBottom:10}}>Tap any section in this sample to set its font size &amp; spacing. Drag sections to reorder, or swap the header. Whatever you set here becomes the default on every new invoice — no need to redo it each time.</div>
+      <div className="inv-design-stage">
+        <InvoicePreview settings={settings} saveSettings={saveSettings} inv={{number:(iv.prefix||'INV-')+String(iv.seq||1).padStart(4,'0'),issueDate:todayISO(),dueDate:addDays(todayISO(),iv.terms||14),status:'sent',taxRate:num(iv.taxRate),paymentLink:iv.paymentLink||'https://buy.stripe.com/your-link',notes:iv.notes||'Thank you for your business.',billTo:{company:'Acme Realty Group',name:'Jordan Blake',email:'jordan@acmerealty.com',address:'88 Douglas Ave\nWichita, KS 67202'},items:[{id:'s1',label:'Website foundation — design & build',qty:1,amount:1200},{id:'s2',label:'AI front office — monthly retainer',qty:1,amount:199}]}}/>
+      </div>
+    </div>); })()}
+
+    {/* dropdown options */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><SlidersHorizontal size={15}/>Dropdown Options</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Add or remove the choices that appear in every lead. Applies everywhere instantly.</div>
+      <OptionEditor label="Lead Source" items={settings.options.source} onChange={a=>setOptions('source',a)}/>
+      <OptionEditor label="Next Action" items={settings.options.nextAction} onChange={a=>setOptions('nextAction',a)}/>
+      <OptionEditor label="Owner" items={settings.options.owner||OWNERS} onChange={a=>setOptions('owner',a)}/>
+    </div>
+
+    {/* stages */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Layers size={15}/>Pipeline Stages</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Rename, recolor, reorder, or add stages. Mark one or more as <b>Won</b> (counts as closed revenue) or <b>Lost</b>.</div>
+      <StageEditor stages={settings.stages} onChange={s=>saveSettings({...settings,stages:s})}/>
+    </div>
+
+    {/* delivery tracks */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><Rocket size={15}/>Loan file track</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>The high-level milestones a loan file moves through to the closing table. Shows as a progress bar on each loan.</div>
+      <DeliveryEditor tracks={settings.deliveryTracks||LENDER_DELIVERY_TRACKS} services={[]} onChange={t=>saveSettings({...settings,deliveryTracks:t})}/>
+    </div>
+
+    {/* custom fields */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><List size={15}/>Custom Fields</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Add your own columns to every lead. Toggle "show in table" to put them on the Leads page.</div>
+      <CustomFieldEditor fields={settings.customFields||[]} onChange={f=>saveSettings({...settings,customFields:f})}/>
+    </div>
+
+    {/* backup */}
+    <div className="card" style={{marginBottom:18}}>
+      <div className="sec-title"><FileText size={15}/>Backup & Restore</div>
+      <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Download a full snapshot (every lead, note, setting, and custom field) — or restore one. Save these regularly.</div>
+      <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+        <button className="btn btn-p" onClick={exportAll}><Download size={15}/>Export full backup (JSON)</button>
+        <label className="btn btn-g" style={{cursor:'pointer'}}><Upload size={15}/>Restore from backup<input type="file" accept="application/json,.json" onChange={importAll} style={{display:'none'}}/></label>
+        <button className="btn btn-d" onClick={()=>{if(window.confirm('Reset to the sample demo leads? Export a backup first if you want to keep current data.'))saveLeads(seed());}}><Trash2 size={15}/>Reset to seed leads</button>
+      </div>
+    </div>
+
+    <div className="note">
+      <b>This preview saves to your browser.</b> The next step wires it to Supabase so you and Logan share one live board with separate logins — and your data lives in the database, not the code, so future redeploys can never wipe a single lead. Keep exporting JSON backups as your offline safety net.
+    </div>
+  </>);
+}
+
+function OwnerAdd({existing,onAdd}){
+  const [v,setV]=useState('');
+  const go=()=>{ const n=v.trim(); if(!n) return; if((existing||[]).includes(n)){ setV(''); return; } onAdd(n); setV(''); };
+  return (<div className="addrow" style={{marginTop:12}}>
+    <input placeholder="Add a person as an owner…" value={v} onChange={e=>setV(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+    <button className="btn btn-g btn-sm" onClick={go}><UserPlus size={14}/>Add owner</button>
+  </div>);
+}
+function OptionEditor({label,items,onChange}){
+  const [val,setVal]=useState('');
+  const add=()=>{const v=val.trim();if(!v||items.includes(v))return;onChange([...items,v]);setVal('');};
+  return (<div style={{marginBottom:18}}>
+    <div style={{fontSize:12.5,fontWeight:700,color:INK,marginBottom:9}}>{label}</div>
+    <div>{items.map(it=><span className="opt-chip" key={it}>{it}<button onClick={()=>onChange(items.filter(x=>x!==it))}><X size={13}/></button></span>)}</div>
+    <div className="addrow"><input placeholder={`Add ${label.toLowerCase()}…`} value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==='Enter'&&add()}/><button className="btn btn-g btn-sm" onClick={add}><Plus size={14}/>Add</button></div>
+  </div>);
+}
+
+function StageEditor({stages,onChange}){
+  const upd=(i,patch)=>onChange(stages.map((s,j)=>j===i?{...s,...patch}:s));
+  const move=(i,dir)=>{const j=i+dir;if(j<0||j>=stages.length)return;const a=[...stages];[a[i],a[j]]=[a[j],a[i]];onChange(a);};
+  const del=i=>{if(stages.length<=2){window.alert('Keep at least two stages.');return;}onChange(stages.filter((_,j)=>j!==i));};
+  const add=()=>{const key='stage'+uid();onChange([...stages,{key,label:'New Stage',color:STAGE_COLORS[stages.length%STAGE_COLORS.length],prob:0.3,open:true,won:false,lost:false}]);};
+  const setType=(i,t)=>upd(i,{open:t==='open',won:t==='won',lost:t==='lost',prob:t==='won'?1:t==='lost'?0:0.3});
+  const typeOf=s=>s.won?'won':s.lost?'lost':'open';
+  return (<div>
+    {stages.map((s,i)=>(<div className="set-row" key={s.key}>
+      <div style={{display:'flex',flexDirection:'column',gap:2}}>
+        <button className="iconbtn" style={{height:18,width:24}} onClick={()=>move(i,-1)} disabled={i===0}><ChevronUp size={14}/></button>
+        <button className="iconbtn" style={{height:18,width:24}} onClick={()=>move(i,1)} disabled={i===stages.length-1}><ChevronDown size={14}/></button>
+      </div>
+      <input type="color" className="swatch" value={s.color} onChange={e=>upd(i,{color:e.target.value})}/>
+      <input style={{flex:1,minWidth:90,padding:'8px 10px',border:'1px solid #DEDFEA',borderRadius:8,fontSize:13.5,fontFamily:'Inter'}} value={s.label} onChange={e=>upd(i,{label:e.target.value})}/>
+      <select className="selctl" value={typeOf(s)} onChange={e=>setType(i,e.target.value)}><option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option></select>
+      {s.open&&<input type="number" min="0" max="100" title="Win %" style={{width:64,padding:'8px 8px',border:'1px solid #DEDFEA',borderRadius:8,fontSize:13}} value={Math.round(num(s.prob)*100)} onChange={e=>upd(i,{prob:num(e.target.value)/100})}/>}
+      <button className="iconbtn" onClick={()=>del(i)} title="Delete stage"><Trash2 size={14}/></button>
+    </div>))}
+    <button className="btn btn-g btn-sm" style={{marginTop:12}} onClick={add}><Plus size={14}/>Add stage</button>
+  </div>);
+}
+
+function CustomFieldEditor({fields,onChange}){
+  const [label,setLabel]=useState('');const [type,setType]=useState('text');const [opts,setOpts]=useState('');
+  const add=()=>{const l=label.trim();if(!l)return;const f={id:uid(),label:l,type,showInTable:false};if(type==='select')f.options=opts.split(',').map(x=>x.trim()).filter(Boolean);onChange([...fields,f]);setLabel('');setOpts('');setType('text');};
+  return (<div>
+    {fields.map((f,i)=>(<div className="set-row" key={f.id}>
+      <Tag size={15} color="#928DAD"/>
+      <div style={{flex:1}}><div style={{fontWeight:600,color:INK,fontSize:13.5}}>{f.label}</div><div className="subcell">{f.type}{f.type==='select'&&f.options?` · ${f.options.join(', ')}`:''}</div></div>
+      <label className="toggle" style={{margin:0,fontSize:12}}><span className={'sw sm '+(f.showInTable?'on':'')} onClick={()=>onChange(fields.map(x=>x.id===f.id?{...x,showInTable:!x.showInTable}:x))}><b/></span>in table</label>
+      <button className="iconbtn" onClick={()=>onChange(fields.filter(x=>x.id!==f.id))}><Trash2 size={14}/></button>
+    </div>))}
+    {!fields.length&&<div className="empty" style={{padding:'10px 0',textAlign:'left'}}>No custom fields yet.</div>}
+    <div className="addrow">
+      <input placeholder="Field name (e.g. Contract Link)" value={label} onChange={e=>setLabel(e.target.value)}/>
+      <select value={type} onChange={e=>setType(e.target.value)}><option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="select">Dropdown</option><option value="checkbox">Checkbox</option></select>
+      {type==='select'&&<input placeholder="Options, comma-separated" value={opts} onChange={e=>setOpts(e.target.value)} style={{flex:1,minWidth:160}}/>}
+      <button className="btn btn-g btn-sm" onClick={add}><Plus size={14}/>Add field</button>
+    </div>
+  </div>);
+}
+
+function DeliveryEditor({tracks,services,onChange}){
+  const upd=(i,patch)=>onChange(tracks.map((t,j)=>j===i?{...t,...patch}:t));
+  const addTrack=()=>onChange([...tracks,{key:'track'+uid(),label:'New Track',services:[],milestones:['Step 1']}]);
+  const delTrack=i=>{if(window.confirm('Delete this delivery track?'))onChange(tracks.filter((_,j)=>j!==i));};
+  const toggleSvc=(i,s)=>{const cur=tracks[i].services||[];upd(i,{services:cur.includes(s)?cur.filter(x=>x!==s):[...cur,s]});};
+  const Milestones=({i})=>{const [v,setV]=useState('');const ms=tracks[i].milestones||[];
+    const addM=()=>{const x=v.trim();if(!x||ms.includes(x))return;upd(i,{milestones:[...ms,x]});setV('');};
+    const moveM=(k,d)=>{const j=k+d;if(j<0||j>=ms.length)return;const a=ms.slice();[a[k],a[j]]=[a[j],a[k]];upd(i,{milestones:a});};
+    return (<div style={{marginTop:8}}>
+      {ms.map((m,k)=>(<div key={m} style={{display:'flex',alignItems:'center',gap:6,padding:'4px 0'}}>
+        <span style={{flex:1,fontSize:13,color:'#3a3658'}}>{k+1}. {m}</span>
+        <button className="iconbtn" style={{width:24,height:24}} onClick={()=>moveM(k,-1)} disabled={k===0}><ChevronUp size={13}/></button>
+        <button className="iconbtn" style={{width:24,height:24}} onClick={()=>moveM(k,1)} disabled={k===ms.length-1}><ChevronDown size={13}/></button>
+        <button className="iconbtn" style={{width:24,height:24}} onClick={()=>upd(i,{milestones:ms.filter(x=>x!==m)})}><Trash2 size={12}/></button>
+      </div>))}
+      <div className="addrow"><input placeholder="Add milestone…" value={v} onChange={e=>setV(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addM()} style={{flex:1,minWidth:160}}/><button className="btn btn-g btn-sm" onClick={addM}><Plus size={14}/>Add</button></div>
+    </div>);
+  };
+  return (<div>
+    {tracks.map((t,i)=>(<div key={t.key} style={{border:'1px solid #E8E9F2',borderRadius:12,padding:'14px 16px',marginBottom:12}}>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+        <input style={{flex:1,padding:'9px 11px',border:'1px solid #DEDFEA',borderRadius:8,fontSize:14,fontFamily:'Inter',fontWeight:600}} value={t.label} onChange={e=>upd(i,{label:e.target.value})}/>
+        <button className="iconbtn" onClick={()=>delTrack(i)}><Trash2 size={14}/></button>
+      </div>
+      <div style={{fontSize:11,fontWeight:700,letterSpacing:'.05em',textTransform:'uppercase',color:'#928DAD',marginBottom:7}}>Shows for services</div>
+      <div className="chips">{services.map(s=><span key={s} className={'chip '+((t.services||[]).includes(s)?'on':'')} onClick={()=>toggleSvc(i,s)}>{s}</span>)}</div>
+      <div style={{fontSize:11,fontWeight:700,letterSpacing:'.05em',textTransform:'uppercase',color:'#928DAD',margin:'14px 0 0'}}>Milestones</div>
+      <Milestones i={i}/>
+    </div>))}
+    <button className="btn btn-g btn-sm" onClick={addTrack}><Plus size={14}/>Add track</button>
+  </div>);
+}
+
+/* ===================== MODAL ===================== */
+/* meeting list + scheduler used inside the lead modal. Top-level so form state
+   survives modal re-renders. */
+function fmtMeetingTime(iso){ try{ const d=new Date(iso); return d.toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch{ return iso; } }
+function MeetingScheduler({lead,gcalConnected,onSchedule}){
+  const [date,setDate]=useState(todayISO());
+  const [time,setTime]=useState('10:00');
+  const [dur,setDur]=useState(30);
+  const [mtype,setMtype]=useState('Coffee');
+  const [title,setTitle]=useState('');
+  const [invite,setInvite]=useState(false);
+  const [meet,setMeet]=useState(false);
+  const [notes,setNotes]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState('');
+  const hasEmail=!!(lead.email&&lead.email.trim());
+  const pad=n=>String(n).padStart(2,'0');
+  const localISO=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+  const go=async()=>{
+    setErr('');
+    const startDt=new Date(`${date}T${time}:00`);
+    if(isNaN(startDt)){ setErr('Pick a valid date and time.'); return; }
+    const endDt=new Date(startDt.getTime()+dur*60000);
+    const t=title.trim()||`${mtype} with ${lead.name||lead.company||'client'}`;
+    setBusy(true);
+    try{
+      await onSchedule({title:t,mtype,start:localISO(startDt),end:localISO(endDt),invited:invite&&hasEmail,attendees:(invite&&hasEmail)?[lead.email.trim()]:[],meet,notes:notes.trim()});
+      setTitle('');setNotes('');setInvite(false);setMeet(false);
+    }catch(e){ setErr(e.message||'Could not schedule'); }
+    setBusy(false);
+  };
+  return (<div className="mtg-form">
+    {!gcalConnected&&<div className="mtg-warn"><AlertTriangle size={13}/><span>Google Calendar isn’t connected. Open <b>Settings → Google Calendar</b> and hit Connect to push meetings to admin@getproytech.com.</span></div>}
+    <div className="mtype-row">{MEETING_TYPES.map(t=><button key={t} type="button" className={'mtype'+(mtype===t?' on':'')} onClick={()=>setMtype(t)}>{t}</button>)}</div>
+    <div className="fgrid">
+      <div className="field full"><label>Title</label><input value={title} onChange={e=>setTitle(e.target.value)} placeholder={`${mtype} with ${lead.name||lead.company||'client'}`}/></div>
+      <div className="field"><label>Date</label><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
+      <div className="field"><label>Time</label><input type="time" value={time} onChange={e=>setTime(e.target.value)}/></div>
+      <div className="field"><label>Length</label><select value={dur} onChange={e=>setDur(+e.target.value)}>{[15,30,45,60,90,120].map(m=><option key={m} value={m}>{m<60?m+' min':(m/60)+' hr'+(m%60?' 30m':'')}</option>)}</select></div>
+      <div className="field"><label>&nbsp;</label><div className="mtg-toggles">
+        <label className={'mtg-chk'+(invite&&hasEmail?' on':'')+(hasEmail?'':' off')} title={hasEmail?lead.email:'Add an email to this lead to invite them'}><input type="checkbox" disabled={!hasEmail} checked={invite&&hasEmail} onChange={e=>setInvite(e.target.checked)}/><UserPlus size={13}/>Invite client</label>
+        <label className={'mtg-chk'+(meet?' on':'')}><input type="checkbox" checked={meet} onChange={e=>setMeet(e.target.checked)}/><Video size={13}/>Meet link</label>
+      </div></div>
+      <div className="field full"><label>Notes (optional)</label><textarea rows={2} value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Agenda, what to prep…"/></div>
+    </div>
+    {err&&<div className="mtg-err">{err}</div>}
+    <button className="btn btn-p" disabled={busy||!gcalConnected} onClick={go}>{busy?<Loader2 size={15} className="spin"/>:<CalendarClock size={15}/>}{busy?'Scheduling…':'Schedule + add to Calendar'}</button>
+  </div>);
+}
+function MeetingList({meetings,onRemove,onStatus,onType}){
+  const now=Date.now();
+  const sorted=[...(meetings||[])].sort((a,b)=>(a.start||'').localeCompare(b.start||''));
+  const upcoming=sorted.filter(m=>new Date(m.end||m.start).getTime()>=now);
+  const past=sorted.filter(m=>new Date(m.end||m.start).getTime()<now).reverse();
+  if(!sorted.length) return <div className="mtg-empty">No meetings yet. Schedule one below.</div>;
+  const Row=m=>(<div className={'mtg-row'+(m.status==='held'?' held':'')+(m.status==='noshow'?' noshow':'')} key={m.id}>
+    <div className="mtg-when"><CalendarClock size={13}/>{fmtMeetingTime(m.start)}</div>
+    <div className="mtg-mid"><div className="mtg-title">{m.title}</div><div className="mtg-badges">
+      <select className={'mtg-type'+(m.mtype?'':' unset')} value={m.mtype||''} onClick={e=>e.stopPropagation()} onChange={e=>onType&&onType(m,e.target.value)}>
+        <option value="">+ type</option>{MEETING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+      </select>
+      {m.invited&&<span className="mtg-b"><UserPlus size={10}/>invited</span>}
+      {m.meet&&(m.meetLink?<a className="mtg-b link" href={m.meetLink} target="_blank" rel="noreferrer"><Video size={10}/>Join</a>:<span className="mtg-b"><Video size={10}/>Meet</span>)}
+      {m.htmlLink&&<a className="mtg-b link" href={m.htmlLink} target="_blank" rel="noreferrer"><Expand size={10}/>Calendar</a>}
+    </div></div>
+    <div className="mtg-status">
+      <button className={'ms-b held'+(m.status==='held'?' on':'')} title="It happened" onClick={()=>onStatus&&onStatus(m,'held')}><CheckCircle2 size={12}/>Held</button>
+      <button className={'ms-b no'+(m.status==='noshow'?' on':'')} title="They didn't show" onClick={()=>onStatus&&onStatus(m,'noshow')}><X size={12}/>No-show</button>
+    </div>
+    <button className="m-x" style={{width:28,height:28,flex:'none'}} title="Cancel + remove from calendar" onClick={()=>{if(window.confirm('Cancel this meeting and remove it from Google Calendar?'))onRemove(m);}}><X size={14}/></button>
+  </div>);
+  return (<div className="mtg-list">
+    {upcoming.length>0&&<><div className="mtg-band">Upcoming · {upcoming.length}</div>{upcoming.map(Row)}</>}
+    {past.length>0&&<><div className="mtg-band past">Past · {past.length}</div>{past.map(Row)}</>}
+  </div>);
+}
+function Modal({lead,isNew,settings,stages,addOption,me,allLeads,navList,onNav,convertToClient,revertClient,toggleMilestone,setMilestoneDue,onClose,updateLead,addActivity,delActivity,delLead,createNew,gcalConnected,createCalendarEvent,deleteCalendarEvent,tagMeeting,multiUser,pools}){
+  const _list=navList||[]; const _idx=isNew?-1:_list.indexOf(lead?.id);
+  const prevId=_idx>0?_list[_idx-1]:null; const nextId=(_idx>=0&&_idx<_list.length-1)?_list[_idx+1]:null;
+  const opt=settings.options; const customFields=settings.customFields||[];
+  const LENDER=settings.preset==='lender';   // lender build → show loan fields, relabel a few things
+  const blank={id:uid(),name:'',company:'',businessType:'—',phone:'',email:'',website:'',stage:stages[0].key,priority:'medium',source:'',nextAction:'Follow Up Call',nextSteps:'',followUp:'',expectedClose:'',serviceInterest:[],owner:me||BRAND.team[0]||'',dealValue:0,retainer:0,retainerActive:false,retainerStart:'',closedAt:'',isRelationship:false,introducedBy:'',relNote:'',relTier:'',meetings:[],custom:{},createdAt:new Date().toISOString(),activities:[]};
+  const [draft,setDraft]=useState(isNew?blank:lead);
+  const [atype,setAtype]=useState('Note');const [atext,setAtext]=useState('');const [who,setWho]=useState(me||BRAND.team[0]||'');const [feedFilter,setFeedFilter]=useState('All');
+  const [openSec,setOpenSec]=useState({});
+  const [showMore,setShowMore]=useState(false);
+  const [firstNote,setFirstNote]=useState('');
+  const [logMtype,setLogMtype]=useState('Coffee');
+  const [firstType,setFirstType]=useState('Call');
+  useEffect(()=>{if(!isNew&&lead)setDraft(lead);},[lead,isNew]);
+  const set=patch=>{if(isNew)setDraft({...draft,...patch});else{setDraft({...draft,...patch});updateLead(draft.id,patch);}};
+  const doSchedule=async(m)=>{ const ev=await createCalendarEvent(m); const meeting={id:uid(),eventId:ev.eventId,htmlLink:ev.htmlLink,meetLink:ev.meetLink,title:m.title,mtype:m.mtype||'Other',status:'',start:m.start,end:m.end,invited:!!m.invited,meet:!!m.meet,notes:m.notes||'',createdAt:new Date().toISOString()};
+    const activity={id:uid(),ts:new Date().toISOString(),type:'Booked',mtype:m.mtype||'Other',meetingId:meeting.id,text:`${m.mtype||'Meeting'} booked: ${m.title} — ${fmtDate(m.start)}`,who:me};
+    set({meetings:[...(draft.meetings||[]),meeting],activities:[activity,...(draft.activities||[])]}); return meeting; };
+  const doRemove=async(mt)=>{ await deleteCalendarEvent(mt.eventId); set({meetings:(draft.meetings||[]).filter(x=>x.id!==mt.id)}); };
+  /* did it actually happen? booked is a promise, held is the result. */
+  const doStatus=(mt,status)=>{ const next=(draft.meetings||[]).map(x=>x.id===mt.id?{...x,status:x.status===status?'':status}:x);
+    const was=(draft.meetings||[]).find(x=>x.id===mt.id); const flip=was&&was.status===status;
+    const act=flip?null:{id:uid(),ts:new Date().toISOString(),type:'Meeting',text:`${status==='held'?'Met':'No-show'}: ${mt.title}`,who:me};
+    set(act?{meetings:next,activities:[act,...(draft.activities||[])]}:{meetings:next}); };
+  const setCustom=(id,v)=>set({custom:{...(draft.custom||{}),[id]:v}});
+  const toggleSvc=s=>{const cur=draft.serviceInterest||[];set({serviceInterest:cur.includes(s)?cur.filter(x=>x!==s):[...cur,s]});};
+  const addCustomAction=()=>{const v=window.prompt('New Next Action:');if(v&&v.trim()){addOption('nextAction',v.trim());set({nextAction:v.trim()});}};
+  const addCustomSvc=()=>{const v=window.prompt('New Service Interest:');if(v&&v.trim()){addOption('service',v.trim());toggleSvc(v.trim());}};
+  const F=({label,k,type,full})=>(<div className={'field'+(full?' full':'')}><label>{label}</label><input type={type||'text'} value={draft[k]??''} onChange={e=>set({[k]:e.target.value})}/></div>);
+  const dealBreak=(draft.deal&&typeof draft.deal==='object')
+    ? {setup:draft.deal.setup??'',website:draft.deal.website??'',integration:draft.deal.integration??'',extras:Array.isArray(draft.deal.extras)?draft.deal.extras:[]}
+    : {setup:(draft.dealValue||''),website:'',integration:'',extras:[]};
+  const dealSum=d=>num(d.setup)+num(d.website)+num(d.integration)+(d.extras||[]).reduce((a,e)=>a+num(e.amount),0);
+  const setDeal=next=>set({deal:next,dealValue:dealSum(next)});
+  const Sel=({label,k,opts})=>(<div className="field"><label>{label}</label><select value={draft[k]} onChange={e=>set({[k]:e.target.value})}>{opts.map(o=>typeof o==='string'?<option key={o} value={o}>{o||'—'}</option>:<option key={o.v} value={o.v}>{o.l}</option>)}</select></div>);
+  /* collapsible section. called as a function (not <Sec/>) so inputs inside
+     never remount and lose focus while typing. */
+  /* one-tap access: open a section and bring it into view. Clicking a header
+     fact or a jump chip lands you on the right block with no scrolling. */
+  const jumpTo=k=>{ setOpenSec(o=>({...o,[k]:true}));
+    setTimeout(()=>{ const el=document.getElementById('msec-'+k); if(el&&el.scrollIntoView) el.scrollIntoView({behavior:'smooth',block:'start'}); },70); };
+  const Sec=(k,icon,title,summary,body,defOpen)=>{
+    const isOpen=openSec[k]??!!defOpen;
+    return (<div className={'msec'+(isOpen?' open':'')} id={'msec-'+k} key={k}>
+      <div className="msec-h" onClick={()=>setOpenSec(o=>({...o,[k]:!isOpen}))}>
+        <span className="msec-t">{icon}{title}</span>
+        {!isOpen&&summary?<span className="msec-s">{summary}</span>:null}
+        <ChevronDown size={15} className="msec-ch"/>
+      </div>
+      {isOpen&&<div className="msec-b">{body}</div>}
+    </div>);
+  };
+  const logIt=()=>{const t=atext.trim()||(atype==='Booked'?`${logMtype} booked.`:'');if(!t)return;addActivity(draft.id,atype,t,who,atype==='Booked'?{mtype:logMtype}:undefined);setAtext('');};
+  const create=()=>{
+    if(!draft.name.trim()){window.alert('Add a name first.');return;}
+    const ts=new Date().toISOString();
+    const acts=[{id:uid(),ts,type:'Note',text:'Lead created.',who}];
+    if(firstNote.trim()) acts.unshift({id:uid(),ts,type:firstType,text:firstNote.trim(),who});
+    createNew({...draft,activities:acts});
+  };
+  const feed=(isNew?[]:(lead?.activities||[])).filter(a=>feedFilter==='All'||a.type===feedFilter);
+  const noteCount=(lead?.activities||[]).filter(a=>a.type==='Note').length;
+  return (<div className="scrim2" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal" onMouseDown={e=>e.stopPropagation()}>
+      <div className="m-head">
+        <div style={{minWidth:0}}>
+          <h2>{draft.name||'New Lead'}</h2>{!isNew&&<div className="co">{[draft.loanPurpose,draft.loanType].filter(Boolean).join(' · ')||'Borrower'}{draft.company?` · co: ${draft.company}`:''}</div>}
+          {!isNew&&<div className="meta">Added {fmtDate(draft.createdAt)} · Last contact {fmtDate(lastContact(draft))}</div>}
+          {!isNew&&<div className="qa">
+            <StageBadge k={draft.stage} stages={stages}/><PriBadge p={draft.priority}/>
+            {draft.phone&&<a className="qbtn" href={`tel:${draft.phone}`}><Phone size={12}/>Call</a>}
+            {draft.phone&&<a className="qbtn" href={`sms:${draft.phone}`}><MessageSquare size={12}/>Text</a>}
+            {draft.email&&<a className="qbtn" href={`mailto:${draft.email}`}><Mail size={12}/>Email</a>}
+            {draft.website&&<a className="qbtn" href={draft.website.startsWith('http')?draft.website:'https://'+draft.website} target="_blank" rel="noreferrer"><Globe size={12}/>Site</a>}
+          </div>}
+        </div>
+        <div className="m-headright">
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            {!isNew&&_list.length>1&&<>
+              <button className="m-x" disabled={!prevId} onClick={()=>prevId&&onNav(prevId)} title="Previous lead"><ChevronLeft size={18}/></button>
+              <span style={{fontSize:12,fontWeight:600,color:'#928DAD',minWidth:46,textAlign:'center'}}>{_idx+1} / {_list.length}</span>
+              <button className="m-x" disabled={!nextId} onClick={()=>nextId&&onNav(nextId)} title="Next lead"><ChevronRight size={18}/></button>
+            </>}
+            <button className="m-x" onClick={onClose}><X size={18}/></button>
+          </div>
+          {!isNew&&(()=>{ const bc=bookedCount(draft);
+            const next=[...(draft.meetings||[])].filter(mt=>new Date(mt.end||mt.start).getTime()>=Date.now()).sort((a,b)=>(a.start||'').localeCompare(b.start||''))[0];
+            const facts=[
+              {k:'qual',  l:'Source',   v:draft.source||'—'},
+              {k:'qual',  l:'Loan Officer', v:draft.owner||'—'},
+              {k:'qual',  l:'Purpose',  v:draft.loanPurpose||'—'},
+              {k:'qual',  l:'Target Close', v:draft.targetClose?fmtDate(draft.targetClose):'—'},
+              {k:'qual',  l:'Pre-Approval', v:(draft.preApprovalStart||draft.preApprovalExp)?`${draft.preApprovalStart?fmtDate(draft.preApprovalStart):'—'} – ${draft.preApprovalExp?fmtDate(draft.preApprovalExp):'—'}`:'—', hot:draft.preApprovalExp?(daysUntil(draft.preApprovalExp)>=0&&daysUntil(draft.preApprovalExp)<=15):false},
+              {k:'deal',  l:'Loan Amt', v:num(draft.dealValue)>0?usd(draft.dealValue):'—'},
+              {k:'meetings',l:'Meetings',v:next?fmtDate(next.start):(bc?bc+' booked':'—'),hot:!!next},
+            ];
+            return (<div className="m-facts">{facts.map((f,i)=>(
+              <button key={i} className={'mf'+(f.hot?' hot':'')} onClick={()=>jumpTo(f.k)} title={`Open ${f.k==='qual'?'Qualifying':f.k==='deal'?'Loan':'Meetings'}`}>
+                <i>{f.l}</i><b>{f.v}</b>
+              </button>))}</div>);
+          })()}
+        </div>
+      </div>
+      {!isNew&&<div className="m-jump">
+        <span className="mj-l">Jump to</span>
+        {[['meetings','Meetings',CalendarCheck,bookedCount(draft)||''],
+          ['qual','Qualifying',SlidersHorizontal,''],
+          ['type','Referral',Users,''],
+          ['deal','Loan',DollarSign,'']].map(([k,label,Ic,badge])=>(
+          <button key={k} className={'mj'+(openSec[k]?' on':'')} onClick={()=>jumpTo(k)}><Ic size={13}/>{label}{badge!==''&&<i>{badge}</i>}</button>
+        ))}
+      </div>}
+      <div className="m-grid">
+        <div className="m-left">
+          {/* ---------- 1. CONTACT — always first, always open ---------- */}
+          <div className="dh"><Contact2 size={13}/>{isNew?'New lead':'Contact'}</div>
+          <div className="fgrid">
+            {F({label:'Borrower name',k:'name'})}{F({label:'Co-borrower',k:'company'})}
+            {F({label:'Phone',k:'phone',type:'tel'})}{F({label:'Email',k:'email',type:'email'})}
+            {F({label:'Website',k:'website',full:true})}
+          </div>
+          {isNew&&(draft.phone||draft.email)&&(()=>{
+            const dupes=(allLeads||[]).filter(x=>{
+              const ph=(v)=>(v||'').replace(/\D/g,'');
+              return (draft.phone&&ph(x.phone)&&ph(x.phone)===ph(draft.phone))||(draft.email&&x.email&&x.email.toLowerCase()===draft.email.toLowerCase());
+            });
+            return dupes.length?(<div className="dupe-warn"><AlertTriangle size={14}/><span>Already in the CRM: <b onClick={()=>onNav&&onNav(dupes[0].id)}>{dupes[0].name}</b>{dupes[0].company?` · ${dupes[0].company}`:''}{dupes[0].owner?` · owned by ${dupes[0].owner}`:''}</span></div>):null;
+          })()}
+
+          {/* ---------- 2. FOLLOW-UP — the note lives with the date ---------- */}
+          {!isNew&&<>
+            <div className="dh mt"><Bell size={13}/>Follow-up</div>
+            <div className="fu-block">
+              <div className="fgrid">
+                {F({label:'Follow-up date',k:'followUp',type:'date'})}
+                <div className="field"><label>Next action</label><select value={draft.nextAction} onChange={e=>set({nextAction:e.target.value})}>{opt.nextAction.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+              </div>
+              <div className="field full" style={{marginTop:10}}>
+                <label>What to do on this follow-up</label>
+                <textarea className="fu-note" rows={2} placeholder="e.g. Ask about their listing site — he said call back after the 15th" value={draft.nextSteps||''} onChange={e=>set({nextSteps:e.target.value})}/>
+              </div>
+              {draft.followUp&&<div className={'fu-when'+(daysUntil(draft.followUp)<0?' od':'')}>{daysUntil(draft.followUp)<0?`${Math.abs(daysUntil(draft.followUp))} days overdue`:daysUntil(draft.followUp)===0?'Due today':`Due in ${daysUntil(draft.followUp)} days`} · {fmtDate(draft.followUp)}</div>}
+            </div>
+          </>}
+
+          {/* ---------- 3. QUICK ADD: everything else behind one tap ---------- */}
+          {isNew&&<>
+            <div className="dh mt"><MessageSquare size={13}/>First note</div>
+            <div className="fn-block">
+              <div className="act-types">{ACT_TYPES.map(({key,icon:Ic})=><button key={key} className={'act-t '+(firstType===key?'on':'')+(key==='Booked'?' booked':'')} onClick={()=>setFirstType(key)}><Ic size={12}/>{actLabel(key)}</button>)}</div>
+              <textarea className="fu-note" style={{marginTop:9}} rows={3} placeholder={`How'd the ${firstType.toLowerCase()} go? What did they say?`} value={firstNote} onChange={e=>setFirstNote(e.target.value)}/>
+              <div className="fn-hint">{firstNote.trim()?<><CheckCircle2 size={12} color={GREEN}/>Logs as a {firstType} from {who} the moment you save</>:'Optional — but log it now while it\u2019s fresh'}</div>
+            </div>
+
+            <button className="morebtn" onClick={()=>setShowMore(!showMore)}>
+              <ChevronDown size={14} className={'mb-ch'+(showMore?' on':'')}/>{showMore?'Hide extra details':'Add more details'}
+              {!showMore&&<i>optional — {draft.owner} · {draft.nextAction}</i>}
+            </button>
+            {showMore&&<div className="fgrid" style={{marginTop:12}}>
+              {Sel({label:'Loan Purpose',k:'loanPurpose',opts:['',...LOAN_PURPOSES]})}{Sel({label:'Lead Source',k:'source',opts:['',...opt.source]})}
+              {Sel({label:'Loan Type',k:'loanType',opts:['',...LOAN_TYPES]})}{Sel({label:'Property Type',k:'propertyType',opts:['',...PROPERTY_TYPES]})}
+              {F({label:'Loan Amount ($)',k:'dealValue',type:'number'})}{Sel({label:'Loan Officer',k:'owner',opts:opt.owner||OWNERS})}
+              {F({label:`Commission % — blank uses default ${num(compOf(settings).pct)}%`,k:'commPct',type:'number'})}{F({label:`Flat $/loan — blank uses default ${num(compOf(settings).flat)}`,k:'commFlat',type:'number'})}
+              {Sel({label:'Stage',k:'stage',opts:stages.map(s=>({v:s.key,l:s.label}))})}{Sel({label:'Priority',k:'priority',opts:Object.entries(PRIORITIES).map(([v,x])=>({v,l:x.label}))})}
+              {F({label:'Follow-up Date',k:'followUp',type:'date'})}{F({label:'Target Close',k:'targetClose',type:'date'})}
+              {F({label:'Notes for the follow-up',k:'nextSteps',full:true})}
+            </div>}
+          </>}
+
+          {/* ---------- 4. DELIVERY (clients only) ---------- */}
+          {!isNew&&draft.isClient&&(()=>{ const tracks=activeTracks(draft,settings.deliveryTracks||DEFAULT_DELIVERY_TRACKS); const ov=clientOverall(draft,settings.deliveryTracks||DEFAULT_DELIVERY_TRACKS);
+            return (<div className="dr-sec deliv">
+              <div className="dh" style={{justifyContent:'space-between',display:'flex'}}><span style={{display:'flex',alignItems:'center',gap:8}}><Rocket size={13}/>Delivery</span><span style={{fontSize:11,color:'#928DAD',fontWeight:600}}>Client since {fmtDate(draft.convertedAt)}</span></div>
+              {tracks.map(tr=>{ const p=trackProgress(draft,tr); return (<div className="track" key={tr.key}>
+                <div className="track-h"><b>{tr.label}</b>{p.overdue>0?<span className="phase od">{p.overdue} overdue</span>:p.nextDue?<span className="phase">Next due {fmtDate(p.nextDue)}</span>:<span className="phase">{p.current?p.current:'Delivered ✓'}</span>}</div>
+                <div className="pbar"><div style={{width:Math.round(p.pct*100)+'%'}}/></div>
+                <div className="mslist">{p.ms.map(m=>{ const e=p.entries[m]; const done=!!e.done; const od=!done&&e.due&&daysUntil(e.due)<0; return (<div className={'ms'+(done?' on':'')+(od?' over':'')} key={m}>
+                  <span className="mcheck" onClick={()=>toggleMilestone(draft.id,tr.key,m)}>{done?<CheckCircle2 size={17} color={GREEN}/>:<Circle size={17} color={od?'#D14343':'#C9C5D9'}/>}<span className="mtxt">{m}</span></span>
+                  {done
+                    ? <span className="mdate done">✓ {fmtDate(e.done)}</span>
+                    : <label className="msdue-w"><span className="msdue-l">{od?'overdue':'due'}</span><input type="date" className={'msdue'+(od?' over':'')} value={e.due||''} onClick={ev=>ev.stopPropagation()} onChange={ev=>setMilestoneDue(draft.id,tr.key,m,ev.target.value)}/></label>}
+                </div>); })}</div>
+              </div>); })}
+              {ov.delivered&&<div className="deliv-done"><CheckCircle2 size={15} color={GREEN}/>All delivery steps complete{ov.doneDate?` · ${fmtDate(ov.doneDate)}`:''} — client marked completed.</div>}
+              <button className="linkbtn" onClick={()=>{ if(window.confirm('Revert this client back to a lead? Delivery progress is kept.')) revertClient(draft.id); }}>Revert to lead</button>
+            </div>);
+          })()}
+
+          {/* ---------- 5. EVERYTHING ELSE — collapsed ---------- */}
+          {!isNew&&<div className="msecs">
+            {Sec('meetings',<CalendarClock size={13}/>,'Meetings',
+              (()=>{ const bc=bookedCount(draft); const ms=draft.meetings||[]; if(!ms.length) return bc?`${bc} booked`:'none scheduled'; const next=[...ms].filter(m=>new Date(m.end||m.start).getTime()>=Date.now()).sort((a,b)=>(a.start||'').localeCompare(b.start||''))[0]; return (bc?`${bc} booked · `:'')+(next?`next: ${fmtMeetingTime(next.start)}`:`${ms.length} past`); })(),
+              <>
+                <MeetingList meetings={draft.meetings} onRemove={doRemove} onStatus={doStatus} onType={(mt,v)=>{tagMeeting&&tagMeeting(draft.id,mt.id,v);setDraft(d=>({...d,meetings:(d.meetings||[]).map(x=>x.id===mt.id?{...x,mtype:v}:x)}));}}/>
+                <MeetingScheduler lead={draft} gcalConnected={gcalConnected} onSchedule={doSchedule}/>
+              </>, (draft.meetings||[]).some(m=>new Date(m.end||m.start).getTime()>=Date.now()))}
+            {Sec('qual',<SlidersHorizontal size={13}/>,'Qualifying',
+              [draft.loanPurpose,draft.loanType,sOf(draft.stage,stages)?.label,PRIORITIES[draft.priority]?.label].filter(Boolean).join(' · ')||'not set',
+              <div className="fgrid">
+                {Sel({label:'Lead Source',k:'source',opts:['',...opt.source]})}{Sel({label:'Loan Officer',k:'owner',opts:opt.owner||OWNERS})}
+                {Sel({label:'Loan Purpose',k:'loanPurpose',opts:['',...LOAN_PURPOSES]})}{Sel({label:'Loan Type',k:'loanType',opts:['',...LOAN_TYPES]})}
+                {Sel({label:'Property Type',k:'propertyType',opts:['',...PROPERTY_TYPES]})}{F({label:'Loan Amount ($)',k:'dealValue',type:'number'})}
+                {Sel({label:'Stage',k:'stage',opts:stages.map(s=>({v:s.key,l:s.label}))})}{Sel({label:'Priority',k:'priority',opts:Object.entries(PRIORITIES).map(([v,x])=>({v,l:x.label}))})}
+                {F({label:'Target Close',k:'targetClose',type:'date'})}{F({label:'Pre-Approval Start',k:'preApprovalStart',type:'date'})}
+                {F({label:'Pre-Approval Expiry',k:'preApprovalExp',type:'date'})}{F({label:'Rate Lock Expiry',k:'rateLockExp',type:'date'})}
+                {multiUser&&<div className="field"><label>Pool</label><select value={draft.pool||''} onChange={e=>set({pool:e.target.value||null})}><option value="">— no pool —</option>{(pools||[]).map(p=><option key={p} value={p}>{p}</option>)}{draft.pool&&!(pools||[]).includes(draft.pool)&&<option value={draft.pool}>{draft.pool}</option>}</select></div>}
+                <div className="field full"><button className="chip add" onClick={addCustomAction}><Plus size={12}/>Add custom Next Action</button></div>
+              </div>)}
+
+            {(()=>{ const candidates=(allLeads||[]).filter(x=>x.id!==draft.id).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+              const intros=(allLeads||[]).filter(x=>x.introducedBy===draft.id);
+              const chain=introChain(draft,allLeads||[]);
+              const root=chain.length?chain[0]:null;
+              const summary=[draft.isRelationship?'Referral partner':'Borrower',chain.length?`via ${chain[chain.length-1].name}`:null].filter(Boolean).join(' · ');
+              return Sec('type',<Users size={13}/>,'Referral & Partner',summary,<>
+                <div className="spon-row">
+                  <label className={'spon-tog rel'+(draft.isRelationship?' on':'')}><input type="checkbox" checked={!!draft.isRelationship} onChange={e=>set({isRelationship:e.target.checked})}/>{draft.isRelationship?'Referral partner — not a borrower':'Borrower'}</label>
+                </div>
+                {draft.isRelationship&&<div className="rel-hint">Kept out of Pipeline, Money &amp; Dashboard — still shows in Follow-Up when due.</div>}
+                {draft.isRelationship&&<div className="tier-btns">{REL_TIERS.map(([k,l,c])=><button key={k} type="button" className={'tier-btn'+((draft.relTier||'new')===k?' on':'')} style={{'--tc':c}} onClick={()=>set({relTier:k})}><span className="tier-dot"/>{l}</button>)}</div>}
+                <div className="fgrid" style={{marginTop:10}}>
+                  <div className="field"><label>{LENDER?'Referring Agent':'Introduced by'}</label>
+                    <select value={draft.introducedBy||''} onChange={e=>set({introducedBy:e.target.value})}>
+                      <option value="">— nobody / direct —</option>
+                      {candidates.map(x=><option key={x.id} value={x.id}>{x.name}{x.company?' · '+x.company:''}</option>)}
+                    </select>
+                  </div>
+                  {F({label:'How you know them',k:'relNote'})}
+                </div>
+                {chain.length>0&&<div className="rel-chain">
+                  <div className="rc-lbl">Intro chain</div>
+                  <div className="rc-path">
+                    {chain.map((pp,i)=>(<React.Fragment key={pp.id}>
+                      <span className={'rc-node'+(i===0?' root':'')} onClick={()=>onNav&&onNav(pp.id)}>{pp.name}</span>
+                      <ChevronRight size={12} className="rc-arrow"/>
+                    </React.Fragment>))}
+                    <span className="rc-node self">{draft.name||'this contact'}</span>
+                  </div>
+                  {chain.length>1&&root&&<div className="rc-root">It all traces back to <b onClick={()=>onNav&&onNav(root.id)}>{root.name}</b></div>}
+                </div>}
+                {intros.length>0&&<div className="rel-gave"><UserPlus size={13}/><span><b>{intros.length}</b> {intros.length===1?'person':'people'} in your CRM came from {draft.name||'this contact'}</span></div>}
+              </>);
+            })()}
+
+            {customFields.length>0&&Sec('custom',<Tag size={13}/>,'Custom Fields',
+              `${customFields.length} field${customFields.length>1?'s':''}`,
+              <div className="fgrid">
+                {customFields.map(f=>(<div className="field" key={f.id} style={f.type==='checkbox'?{gridColumn:'1/-1'}:undefined}>
+                  <label>{f.label}</label>
+                  {f.type==='select'?<select value={draft.custom?.[f.id]||''} onChange={e=>setCustom(f.id,e.target.value)}><option value="">—</option>{(f.options||[]).map(o=><option key={o} value={o}>{o}</option>)}</select>
+                  :f.type==='checkbox'?<label className="toggle" style={{marginTop:2}}><span className={'sw sm '+(draft.custom?.[f.id]?'on':'')} onClick={()=>setCustom(f.id,!draft.custom?.[f.id])}><b/></span>{draft.custom?.[f.id]?'Yes':'No'}</label>
+                  :<input type={f.type==='number'?'number':f.type==='date'?'date':'text'} value={draft.custom?.[f.id]??''} onChange={e=>setCustom(f.id,e.target.value)}/>}
+                </div>))}
+              </div>)}
+
+            {Sec('deal',<DollarSign size={13}/>,'Loan',
+              [num(draft.dealValue)>0?usd(draft.dealValue):null,num(draft.rate)>0?num(draft.rate)+'%':null,num(draft.termYears)>0?num(draft.termYears)+'yr':null].filter(Boolean).join(' · ')||'not set',
+              <>
+                <div className="fgrid">
+                  {F({label:'Loan Amount ($)',k:'dealValue',type:'number'})}
+                  {F({label:'Interest Rate (%)',k:'rate',type:'number'})}
+                  {Sel({label:'Loan Term (yrs)',k:'termYears',opts:['','30','25','20','15','10']})}
+                  {Sel({label:'Loan Type',k:'loanType',opts:['',...LOAN_TYPES]})}
+                </div>
+                {(()=>{ const comp=compOf(settings); return <div className="deal-total"><span>Est. commission ({num(comp.pct)}%{num(comp.flat)>0?` + ${usd(comp.flat)}`:''})</span><b>{usd(commissionOf(draft,comp))}</b></div>; })()}
+              </>)}
+          </div>}
+
+          {/* ---------- 6. CONVERT — the last thing, not the first ---------- */}
+          {!isNew&&!draft.isClient&&<div className="convert-banner">
+            <div><b>Won the deal?</b><div style={{fontSize:12.5,color:'#56527a',marginTop:2}}>Convert to a client to start tracking delivery.</div></div>
+            <button className="btn btn-p" onClick={()=>convertToClient(draft.id)}><UserCheck size={15}/>Start loan file</button>
+          </div>}
+        </div>
+
+        <div className="m-right">
+          {isNew?<div className="empty">Save the lead to start logging activity.</div>:<>
+            <div className="dh"><MessageSquare size={13}/>Activity Log</div>
+            <div className="act-types">{ACT_TYPES.map(({key,icon:Ic})=><button key={key} className={'act-t '+(atype===key?'on':'')+(key==='Booked'?' booked':'')} onClick={()=>setAtype(key)}><Ic size={12}/>{actLabel(key)}</button>)}</div>
+            {atype==='Booked'&&<div className="mtype-row sm">{MEETING_TYPES.map(t=><button key={t} type="button" className={'mtype'+(logMtype===t?' on':'')} onClick={()=>setLogMtype(t)}>{t}</button>)}</div>}
+            <textarea className="act-input" placeholder={atype==='Booked'?"Who with / when? Optional — just hit Log Meeting Booked":`Log a ${atype.toLowerCase()}… (saved with today's date)`} value={atext} onChange={e=>setAtext(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))logIt();}}/>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:8,gap:8}}>
+              <select className="selctl" style={{padding:'7px 9px',fontSize:12.5}} value={who} onChange={e=>setWho(e.target.value)}>{(opt.owner||OWNERS).map(o=><option key={o} value={o}>{o}</option>)}</select>
+              <button className="btn btn-p" style={{padding:'8px 16px'}} onClick={logIt}>Log {actLabel(atype)}</button>
+            </div>
+            <div className="afilter" style={{marginTop:16}}>
+              <button className={feedFilter==='All'?'on':''} onClick={()=>setFeedFilter('All')}>All</button>
+              <button className={feedFilter==='Note'?'on':''} onClick={()=>setFeedFilter('Note')}>Notes{noteCount?` (${noteCount})`:''}</button>
+              {ACT_TYPES.filter(t=>t.key!=='Note').map(t=><button key={t.key} className={feedFilter===t.key?'on':''} onClick={()=>setFeedFilter(t.key)}>{t.key}</button>)}
+            </div>
+            <div className="feed">{feed.map(a=>{const T=ACT_TYPES.find(t=>t.key===a.type);const Ic=T?T.icon:StickyNote;return (<div className={'fitem'+(a.type==='Note'?' note':'')} key={a.id}>
+              <div className="fic"><Ic size={14}/></div><div style={{minWidth:0}}><div className="ftxt">{a.text}</div><div className="fmeta">{a.who?a.who+' · ':''}{actLabel(a.type)} · {fmtStamp(a.ts)}</div></div>
+              <button className="fdel" onClick={()=>delActivity(draft.id,a.id)}><Trash2 size={13}/></button></div>);})}
+              {!feed.length&&<div className="empty" style={{padding:'18px 0'}}>{feedFilter==='All'?'No activity yet. Log your first touch above.':`No ${feedFilter.toLowerCase()} entries yet.`}</div>}</div>
+            <div style={{marginTop:18,paddingTop:16,borderTop:'1px solid #F0F0F6'}}><button className="btn btn-d" onClick={()=>{if(window.confirm('Delete this lead permanently?'))delLead(draft.id);}}><Trash2 size={15}/>Delete lead</button></div>
+          </>}
+        </div>
+      </div>
+      {isNew&&<div className="m-foot">
+        <button className="btn btn-p" onClick={create}><Plus size={16}/>Create Lead</button>
+        <button className="btn btn-g" onClick={onClose}>Cancel</button>
+        <span className="m-foot-n">{draft.name.trim()
+          ? <><CheckCircle2 size={13} color={GREEN}/>{draft.name}{draft.company?' · '+draft.company:''} &rarr; {draft.owner}</>
+          : 'Name is the only thing required'}</span>
+      </div>}
+    </div>
+  </div>);
+}
+
+/* ===================== shared ===================== */
+function Huddle({leads,tasks,settings,stages,rels,saveSettings,me,open}){
+  const H=useMemo(()=>buildHuddle(leads,tasks,settings,stages,rels),[leads,tasks,settings,stages,rels]);
+  const saved=(settings&&settings.huddle)||null;
+  const fresh=saved&&saved.weekKey===H.period.from?saved:null;
+  const [brief,setBrief]=useState(fresh?fresh.brief:null);
+  const [busy,setBusy]=useState(false); const [err,setErr]=useState('');
+  useEffect(()=>{ setBrief(fresh?fresh.brief:null); },[H.period.from,saved&&saved.weekKey]);
+  const cur=H.lastWeek, prev=H.weekBefore;
+  const write=async()=>{ setErr(''); setBusy(true);
+    try{
+      const r=await fetch('/api/huddle',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({digest:H,brand:BRAND.name})});
+      const j=await r.json();
+      if(!j.ok) throw new Error(j.error||'could not write the huddle');
+      setBrief(j.brief);
+      saveSettings({...settings,huddle:{weekKey:H.period.from,brief:j.brief,generatedAt:new Date().toISOString(),by:me}});
+    }catch(e){ setErr(e.message||'something went wrong'); }
+    setBusy(false); };
+  const Delta=({a,b,money})=>{ const c=pctChange(a,b);
+    if(c===null) return <span className="dl up">new</span>;
+    if(c===0) return <span className="dl flat">flat</span>;
+    return <span className={'dl '+(c>0?'up':'down')}>{c>0?'▲':'▼'} {Math.abs(c)}%</span>; };
+  const Stat=({label,value,a,b,money})=>(<div className="hstat">
+    <div className="hs-l">{label}</div>
+    <div className="hs-v">{value}<Delta a={a} b={b}/></div>
+    <div className="hs-p">was {money?usd(b):b}</div>
+  </div>);
+  const copyText=()=>{
+    const L=[];
+    L.push(`MONDAY MORNING HUDDLE — ${H.period.label}`);
+    if(brief){ L.push(''); L.push(brief.headline); L.push(''); L.push(brief.readout);
+      if(brief.wins.length){L.push('');L.push('WINS');brief.wins.forEach(w=>L.push('• '+w));}
+      if(brief.concerns.length){L.push('');L.push('WATCH');brief.concerns.forEach(w=>L.push('• '+w));}
+      if(brief.focus.length){L.push('');L.push('FOCUS THIS WEEK');brief.focus.forEach((f,i)=>L.push(`${i+1}. ${f.title} — ${f.why}`));}
+      if(brief.projection){L.push('');L.push('PROJECTION');L.push(brief.projection);} }
+    L.push(''); L.push('LAST WEEK');
+    L.push(`• ${cur.booked} meetings booked (was ${prev.booked})`);
+    L.push(`• ${cur.held} held, ${cur.noshow} no-show`);
+    L.push(`• ${cur.touches} touches (was ${prev.touches})`);
+    L.push(`• ${cur.newLeads} new leads (was ${prev.newLeads})`);
+    L.push(`• ${cur.closed} closed, ${usd(cur.closedValue)} (was ${prev.closed})`);
+    L.push(`• ${cur.tasksDone} tasks done (was ${prev.tasksDone})`);
+    if(H.slipping.overdueTotal) L.push(`• ${H.slipping.overdueTotal} follow-ups overdue`);
+    try{ navigator.clipboard.writeText(L.join('\n')); }catch{}
+  };
+  return (<>
+    <div className="hud-top">
+      <div>
+        <div className="hud-t">Monday Morning Huddle</div>
+        <div className="hud-d">{H.period.label} · last full week</div>
+      </div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <button className="btn btn-g btn-sm" onClick={copyText}><Clipboard size={14}/>Copy</button>
+        <button className="btn btn-p" disabled={busy} onClick={write}>{busy?<Loader2 size={15} className="spin"/>:<Sparkles size={15}/>}{busy?'Reading the week…':brief?'Rewrite':'Write the huddle'}</button>
+      </div>
+    </div>
+    {err&&<div className="mtg-warn"><AlertTriangle size={13}/><span>{err}</span></div>}
+
+    {brief?(<div className="hud-brief">
+      <div className="hb-head">{brief.headline}</div>
+      <p className="hb-read">{brief.readout}</p>
+      <div className="hb-cols">
+        {brief.wins.length>0&&<div className="hb-col win"><div className="hb-ct"><CheckCircle2 size={13}/>Wins</div>{brief.wins.map((w,i)=><div className="hb-li" key={i}>{w}</div>)}</div>}
+        {brief.concerns.length>0&&<div className="hb-col warn"><div className="hb-ct"><AlertTriangle size={13}/>Watch</div>{brief.concerns.map((w,i)=><div className="hb-li" key={i}>{w}</div>)}</div>}
+      </div>
+      {brief.focus.length>0&&<div className="hb-focus">
+        <div className="hb-ct"><Target size={13}/>Focus this week</div>
+        {brief.focus.map((f,i)=><div className="hb-f" key={i}><b>{i+1}. {f.title}</b><span>{f.why}</span></div>)}
+      </div>}
+      {brief.projection&&<div className="hb-proj"><Zap size={13}/><span>{brief.projection}</span></div>}
+      {fresh&&<div className="hb-when">Written {fmtStamp(fresh.generatedAt)}{fresh.by?` · ${fresh.by}`:''}</div>}
+    </div>):(<div className="hud-empty">
+      <Sparkles size={22}/><b>Nothing written for this week yet</b>
+      <span>The numbers below are live. Hit <b>Write the huddle</b> and Claude reads the whole week and tells you what it means.</span>
+    </div>)}
+
+    <div className="kgroup">Last week by the numbers</div>
+    <div className="hstats">
+      <Stat label="Meetings booked" value={cur.booked} a={cur.booked} b={prev.booked}/>
+      <Stat label="Meetings held" value={cur.held} a={cur.held} b={prev.held}/>
+      <Stat label="Touches" value={cur.touches} a={cur.touches} b={prev.touches}/>
+      <Stat label="New leads" value={cur.newLeads} a={cur.newLeads} b={prev.newLeads}/>
+      <Stat label="Loans funded" value={cur.closed} a={cur.closed} b={prev.closed}/>
+      <Stat label="Funded volume" value={usd(cur.closedValue)} a={cur.closedValue} b={prev.closedValue} money/>
+      <Stat label="Tasks done" value={cur.tasksDone} a={cur.tasksDone} b={prev.tasksDone}/>
+      <Stat label="Loans started" value={cur.onboarded} a={cur.onboarded} b={prev.onboarded}/>
+    </div>
+
+    <div className="r2">
+      <div className="card">
+        <h3>What moved</h3>
+        <div className="ch-sub">Deals, clients and work that changed last week</div>
+        {(cur.stageMoves.length||cur.wonNames.length||cur.newClientNames.length||cur.taskTitles.length)?(<div className="hlist">
+          {cur.wonNames.map((w,i)=><div className="hli win" key={'w'+i}><CheckCircle2 size={13}/>Funded — {w}</div>)}
+          {cur.newClientNames.map((w,i)=><div className="hli win" key={'c'+i}><Rocket size={13}/>New loan file — {w}</div>)}
+          {cur.stageMoves.slice(0,8).map((w,i)=><div className="hli" key={'s'+i}><ArrowUpRight size={13}/>{w}</div>)}
+          {cur.taskTitles.slice(0,8).map((w,i)=><div className="hli done" key={'t'+i}><ListTodo size={13}/>{w}</div>)}
+        </div>):<div className="empty">Quiet week — nothing changed stage.</div>}
+      </div>
+      <div className="card">
+        <h3>What's slipping</h3>
+        <div className="ch-sub">Right now, not last week — this is the to-do list</div>
+        <div className="hlist">
+          {H.slipping.overdueFollowUps.map((o,i)=><div className="hli bad" key={'o'+i}><Bell size={13}/><span onClick={()=>open&&open()}>{o.who}</span> — {o.daysLate}d overdue</div>)}
+          {H.slipping.coldRelationships.map((o,i)=><div className="hli warn" key={'k'+i}><Users size={13}/>{o.who} — {o.daysSinceTouch==null?'never touched':o.daysSinceTouch+'d since contact'} ({o.tier})</div>)}
+          {H.slipping.stalledDeals.map((o,i)=><div className="hli warn" key={'d'+i}><KanbanSquare size={13}/>{o.who} — {o.daysSinceTouch}d cold in {o.stage}{o.value?` · ${usd(o.value)}`:''}</div>)}
+          {(H.slipping.expiring||[]).map((o,i)=><div className={'hli '+(o.days<0?'bad':'warn')} key={'x'+i}><CalendarClock size={13}/>{o.who} — {o.kind} {o.days<0?`expired ${Math.abs(o.days)}d ago`:o.days===0?'expires today':`expires in ${o.days}d`}</div>)}
+          {H.slipping.neverContacted>0&&<div className="hli bad"><Zap size={13}/>{H.slipping.neverContacted} lead{H.slipping.neverContacted===1?'':'s'} never contacted</div>}
+          {!H.slipping.overdueFollowUps.length&&!H.slipping.coldRelationships.length&&!H.slipping.stalledDeals.length&&!(H.slipping.expiring||[]).length&&!H.slipping.neverContacted&&<div className="empty">Nothing slipping. Clean board.</div>}
+        </div>
+      </div>
+    </div>
+  </>);
+}
+
+function Kpi({label,value,d,variant,icon,onClick,active,goal,current}){
+  return (<div className={'kpi '+(variant||'')+(onClick?' clickable':'')+(active?' active':'')} onClick={onClick} role={onClick?'button':undefined}>
+    <div className="kl">{icon}{label}{onClick&&<ChevronDown size={13} className={'kpi-ch'+(active?' on':'')}/>}</div>
+    <div className="kv">{value}</div>{d&&<div className="kd">{d}</div>}
+    {goal>0&&current!=null&&(()=>{ const pct=Math.min(100,Math.round(current/goal*100));
+      const hit=current>=goal; const behind=!hit&&current<goal*monthPace();
+      return (<div className="kgoal">
+        <div className="kgbar"><div style={{width:Math.max(2,pct)+'%',background:hit?GREEN:behind?'#E0662B':COBALT}}/></div>
+        <div className="kgt"><span>{pct}% of goal</span><b className={hit?'hit':behind?'behind':''}>{hit?'hit':behind?'behind pace':'on pace'}</b></div>
+      </div>); })()}
+  </div>);
+}
+/* the panel that opens under the tiles when you tap one */
+function Drill({title,sub,onClose,children}){
+  return (<div className="drill">
+    <div className="drill-h"><span className="drill-t">{title}</span>{sub&&<span className="drill-s">{sub}</span>}<button className="m-x" style={{width:28,height:28,marginLeft:'auto'}} onClick={onClose}><X size={15}/></button></div>
+    <div className="drill-b">{children}</div>
+  </div>);
+}
+function ChartCard({title,sub,children,empty}){return (<div className="card"><h3>{title}</h3>{sub&&<div className="ch-sub">{sub}</div>}{empty?<div className="empty">{empty}</div>:children}</div>);}
