@@ -111,6 +111,16 @@ there, the sidebar falls back to a text logo — no error.
 - **Changing his own password:** Jesse doesn't need the password you set when creating his
   account. Settings → **Your password** lets him set a new one any time — no "current
   password" required, since being signed in already proves it's him.
+- **Meeting types are lender-specific and editable:** Settings → Dropdown Options →
+  "Meeting Type" (Intro Call, Application, Pre-Approval Review, Rate Lock, Closing
+  Walkthrough, Check-in, Other, by default) — add, remove, or rename any of them there.
+- **Vercel's Hobby plan caps a deployment at 12 Serverless Functions.** This project sits
+  at 11 (`api/*.js`, minus `_google.js` which isn't a route). If you add another server-side
+  feature and hit the cap again, the fix is almost always to fold a small new endpoint into
+  an existing file with an `?action=` branch (see `api/google.js` for the pattern) rather
+  than paying for the Pro plan — a new file per tiny endpoint adds up fast. This limit is
+  per Vercel *project*, not shared account-wide, so every other client site you build
+  still gets its own fresh 12-function budget on the free Hobby plan.
 
 ## 8. Terms of Service gate
 

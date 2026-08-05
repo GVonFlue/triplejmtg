@@ -28,6 +28,8 @@ const DEFAULT_OPTIONS={
   source:['Past Client','Realtor Partner','Repeat / Referral','Website','Online (Zillow)','Social Media','Open House','Builder','Financial Planner','Other'],
   nextAction:['Call borrower','Send pre-qual link','Collect docs','Send pre-approval','Lock rate','Order appraisal','Check on conditions','Follow Up','—'],
   owner:[...BRAND.team,BRAND.pool],
+  /* what kind of meeting this is — a lender's actual meeting types, not a generic sales list */
+  meetingType:['Intro Call','Application','Pre-Approval Review','Rate Lock','Closing Walkthrough','Check-in','Other'],
 };
 const DEFAULT_STAGES=[
   {key:'new',      label:'New Lead',      color:'#6B73C9', prob:0.10, open:true,  won:false, lost:false},
@@ -301,7 +303,10 @@ const modList=settings=>{ if(settings&&Array.isArray(settings.modules)) return s
 const lockedModules=settings=>(settings&&settings.preset==='lender')?['invoices','books']:[];
 const modOn=(settings,k)=>!lockedModules(settings).includes(k)&&(ALWAYS_ON.includes(k)||modList(settings).includes(k));
 /* meeting types — coffee and discovery are different motions, track them apart */
-const MEETING_TYPES=['Coffee','Discovery Call','Proposal / Pitch','Onboarding','Check-in','Other'];
+/* meeting types are lender-specific and editable in Settings → Lead options
+   (Settings, "Meeting Type") — this is only the fallback for an install that
+   hasn't saved its own list yet. */
+const meetingTypesOf=settings=>{ const m=settings?.options?.meetingType; return Array.isArray(m)&&m.length?m:DEFAULT_OPTIONS.meetingType; };
 /* ---- Monday Morning Huddle -------------------------------------------------
    Everything here is plain arithmetic on data already captured. The AI only
    ever sees the finished digest, never the database. */
@@ -1610,12 +1615,12 @@ export default function App(){
   const [tosSignatures,setTosSignatures]=useState(null); // null = not loaded yet
   const [crmUsers,setCrmUsers]=useState([]);   // multi-user roster; empty = single-tenant, behaves as before
   const [gcal,setGcal]=useState({connected:false,email:'',loaded:false});
-  const refreshGcal=async()=>{ try{ const r=await fetch('/api/google-status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
+  const refreshGcal=async()=>{ try{ const r=await fetch('/api/google?action=status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
   useEffect(()=>{ refreshGcal();
     const p=new URLSearchParams(window.location.search);
     if(p.get('gcal')){ const u=new URL(window.location.href); u.searchParams.delete('gcal'); u.searchParams.delete('reason'); window.history.replaceState({},'',u.pathname+u.search); }
   },[]);
-  const disconnectGcal=async()=>{ try{ await fetch('/api/google-disconnect',{method:'POST'}); }catch{} setGcal({connected:false,email:'',loaded:true}); };
+  const disconnectGcal=async()=>{ try{ await fetch('/api/google?action=disconnect',{method:'POST'}); }catch{} setGcal({connected:false,email:'',loaded:true}); };
   /* creates the event on Google Calendar; returns {eventId,htmlLink,meetLink}. Persistence
      of the meeting onto the lead happens in the Modal (single patch) to avoid clobbering. */
   const createCalendarEvent=async(m)=>{
@@ -2261,7 +2266,7 @@ function Dashboard({leads,stages,open,tagBooked,rels,settings}){
       {bookedRows.length?bookedRows.map(({lead,act})=>(<div className={'drow'+(act.mtype?'':' untyped')} key={act.id}>
         <div className="drow-m"><Name l={lead}/><div className="subcell">{fmtStamp(act.ts)}{act.who?` · ${act.who}`:''}</div></div>
         <select className={'mtg-type'+(act.mtype?'':' unset')} value={act.mtype||''} onChange={e=>tagBooked&&tagBooked(lead.id,act.id,e.target.value)}>
-          <option value="">+ set type</option>{MEETING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+          <option value="">+ set type</option>{meetingTypesOf(settings).map(t=><option key={t} value={t}>{t}</option>)}
         </select>
       </div>)):<Empty t="No meetings booked in this window."/>}
     </Drill>}
@@ -3699,7 +3704,7 @@ function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoic
       <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Connect your Google account so meetings you book on a lead post automatically to your calendar.</div>
       {gcal&&gcal.connected
         ? <div className="gcal-on"><div className="gcal-dot"/><div><b>Connected{gcal.email?` — ${gcal.email}`:''}</b><div className="subcell">Meetings booked on a lead land here automatically.</div></div><button className="btn btn-g btn-sm" style={{marginLeft:'auto'}} onClick={onDisconnectGcal}>Disconnect</button></div>
-        : <div className="gcal-off"><button className="btn btn-p" onClick={()=>{window.location.href='/api/google-auth';}}><CalendarClock size={15}/>Connect Google Calendar</button><span className="subcell">You’ll approve once, then you’re set.</span></div>}
+        : <div className="gcal-off"><button className="btn btn-p" onClick={()=>{window.location.href='/api/google?action=auth';}}><CalendarClock size={15}/>Connect Google Calendar</button><span className="subcell">You’ll approve once, then you’re set.</span></div>}
     </div>
 
     {/* client phases */}
@@ -3798,6 +3803,7 @@ function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoic
       <OptionEditor label="Lead Source" items={settings.options.source} onChange={a=>setOptions('source',a)}/>
       <OptionEditor label="Next Action" items={settings.options.nextAction} onChange={a=>setOptions('nextAction',a)}/>
       <OptionEditor label="Owner" items={settings.options.owner||OWNERS} onChange={a=>setOptions('owner',a)}/>
+      <OptionEditor label="Meeting Type" items={meetingTypesOf(settings)} onChange={a=>setOptions('meetingType',a)}/>
     </div>
 
     {/* stages */}
@@ -3936,11 +3942,11 @@ function DeliveryEditor({tracks,services,onChange}){
 /* meeting list + scheduler used inside the lead modal. Top-level so form state
    survives modal re-renders. */
 function fmtMeetingTime(iso){ try{ const d=new Date(iso); return d.toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch{ return iso; } }
-function MeetingScheduler({lead,gcalConnected,onSchedule}){
+function MeetingScheduler({lead,gcalConnected,onSchedule,meetingTypes}){
   const [date,setDate]=useState(todayISO());
   const [time,setTime]=useState('10:00');
   const [dur,setDur]=useState(30);
-  const [mtype,setMtype]=useState('Coffee');
+  const [mtype,setMtype]=useState((meetingTypes&&meetingTypes[0])||'Intro Call');
   const [title,setTitle]=useState('');
   const [invite,setInvite]=useState(false);
   const [meet,setMeet]=useState(false);
@@ -3965,7 +3971,7 @@ function MeetingScheduler({lead,gcalConnected,onSchedule}){
   };
   return (<div className="mtg-form">
     {!gcalConnected&&<div className="mtg-warn"><AlertTriangle size={13}/><span>Google Calendar isn’t connected. Open <b>Settings → Google Calendar</b> and hit Connect to push meetings to your calendar.</span></div>}
-    <div className="mtype-row">{MEETING_TYPES.map(t=><button key={t} type="button" className={'mtype'+(mtype===t?' on':'')} onClick={()=>setMtype(t)}>{t}</button>)}</div>
+    <div className="mtype-row">{(meetingTypes||[]).map(t=><button key={t} type="button" className={'mtype'+(mtype===t?' on':'')} onClick={()=>setMtype(t)}>{t}</button>)}</div>
     <div className="fgrid">
       <div className="field full"><label>Title</label><input value={title} onChange={e=>setTitle(e.target.value)} placeholder={`${mtype} with ${lead.name||lead.company||'client'}`}/></div>
       <div className="field"><label>Date</label><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
@@ -3981,7 +3987,7 @@ function MeetingScheduler({lead,gcalConnected,onSchedule}){
     <button className="btn btn-p" disabled={busy||!gcalConnected} onClick={go}>{busy?<Loader2 size={15} className="spin"/>:<CalendarClock size={15}/>}{busy?'Scheduling…':'Schedule + add to Calendar'}</button>
   </div>);
 }
-function MeetingList({meetings,onRemove,onStatus,onType}){
+function MeetingList({meetings,onRemove,onStatus,onType,meetingTypes}){
   const now=Date.now();
   const sorted=[...(meetings||[])].sort((a,b)=>(a.start||'').localeCompare(b.start||''));
   const upcoming=sorted.filter(m=>new Date(m.end||m.start).getTime()>=now);
@@ -3991,7 +3997,7 @@ function MeetingList({meetings,onRemove,onStatus,onType}){
     <div className="mtg-when"><CalendarClock size={13}/>{fmtMeetingTime(m.start)}</div>
     <div className="mtg-mid"><div className="mtg-title">{m.title}</div><div className="mtg-badges">
       <select className={'mtg-type'+(m.mtype?'':' unset')} value={m.mtype||''} onClick={e=>e.stopPropagation()} onChange={e=>onType&&onType(m,e.target.value)}>
-        <option value="">+ type</option>{MEETING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+        <option value="">+ type</option>{(meetingTypes||[]).map(t=><option key={t} value={t}>{t}</option>)}
       </select>
       {m.invited&&<span className="mtg-b"><UserPlus size={10}/>invited</span>}
       {m.meet&&(m.meetLink?<a className="mtg-b link" href={m.meetLink} target="_blank" rel="noreferrer"><Video size={10}/>Join</a>:<span className="mtg-b"><Video size={10}/>Meet</span>)}
@@ -4019,7 +4025,7 @@ function Modal({lead,isNew,settings,stages,addOption,me,allLeads,navList,onNav,c
   const [openSec,setOpenSec]=useState({});
   const [showMore,setShowMore]=useState(false);
   const [firstNote,setFirstNote]=useState('');
-  const [logMtype,setLogMtype]=useState('Coffee');
+  const [logMtype,setLogMtype]=useState(meetingTypesOf(settings)[0]);
   const [firstType,setFirstType]=useState('Call');
   useEffect(()=>{if(!isNew&&lead)setDraft(lead);},[lead,isNew]);
   const set=patch=>{if(isNew)setDraft({...draft,...patch});else{setDraft({...draft,...patch});updateLead(draft.id,patch);}};
@@ -4201,8 +4207,8 @@ function Modal({lead,isNew,settings,stages,addOption,me,allLeads,navList,onNav,c
             {Sec('meetings',<CalendarClock size={13}/>,'Meetings',
               (()=>{ const bc=bookedCount(draft); const ms=draft.meetings||[]; if(!ms.length) return bc?`${bc} booked`:'none scheduled'; const next=[...ms].filter(m=>new Date(m.end||m.start).getTime()>=Date.now()).sort((a,b)=>(a.start||'').localeCompare(b.start||''))[0]; return (bc?`${bc} booked · `:'')+(next?`next: ${fmtMeetingTime(next.start)}`:`${ms.length} past`); })(),
               <>
-                <MeetingList meetings={draft.meetings} onRemove={doRemove} onStatus={doStatus} onType={(mt,v)=>{tagMeeting&&tagMeeting(draft.id,mt.id,v);setDraft(d=>({...d,meetings:(d.meetings||[]).map(x=>x.id===mt.id?{...x,mtype:v}:x)}));}}/>
-                <MeetingScheduler lead={draft} gcalConnected={gcalConnected} onSchedule={doSchedule}/>
+                <MeetingList meetings={draft.meetings} onRemove={doRemove} onStatus={doStatus} onType={(mt,v)=>{tagMeeting&&tagMeeting(draft.id,mt.id,v);setDraft(d=>({...d,meetings:(d.meetings||[]).map(x=>x.id===mt.id?{...x,mtype:v}:x)}));}} meetingTypes={meetingTypesOf(settings)}/>
+                <MeetingScheduler lead={draft} gcalConnected={gcalConnected} onSchedule={doSchedule} meetingTypes={meetingTypesOf(settings)}/>
               </>, (draft.meetings||[]).some(m=>new Date(m.end||m.start).getTime()>=Date.now()))}
             {Sec('qual',<SlidersHorizontal size={13}/>,'Qualifying',
               [draft.loanPurpose,draft.loanType,sOf(draft.stage,stages)?.label,PRIORITIES[draft.priority]?.label].filter(Boolean).join(' · ')||'not set',
@@ -4287,7 +4293,7 @@ function Modal({lead,isNew,settings,stages,addOption,me,allLeads,navList,onNav,c
           {isNew?<div className="empty">Save the lead to start logging activity.</div>:<>
             <div className="dh"><MessageSquare size={13}/>Activity Log</div>
             <div className="act-types">{ACT_TYPES.map(({key,icon:Ic})=><button key={key} className={'act-t '+(atype===key?'on':'')+(key==='Booked'?' booked':'')} onClick={()=>setAtype(key)}><Ic size={12}/>{actLabel(key)}</button>)}</div>
-            {atype==='Booked'&&<div className="mtype-row sm">{MEETING_TYPES.map(t=><button key={t} type="button" className={'mtype'+(logMtype===t?' on':'')} onClick={()=>setLogMtype(t)}>{t}</button>)}</div>}
+            {atype==='Booked'&&<div className="mtype-row sm">{meetingTypesOf(settings).map(t=><button key={t} type="button" className={'mtype'+(logMtype===t?' on':'')} onClick={()=>setLogMtype(t)}>{t}</button>)}</div>}
             <textarea className="act-input" placeholder={atype==='Booked'?"Who with / when? Optional — just hit Log Meeting Booked":`Log a ${atype.toLowerCase()}… (saved with today's date)`} value={atext} onChange={e=>setAtext(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))logIt();}}/>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:8,gap:8}}>
               <select className="selctl" style={{padding:'7px 9px',fontSize:12.5}} value={who} onChange={e=>setWho(e.target.value)}>{(opt.owner||OWNERS).map(o=><option key={o} value={o}>{o}</option>)}</select>
