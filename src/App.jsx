@@ -463,7 +463,7 @@ const funnelOf=(leads,stages)=>{ const flow=(stages||[]).filter(s=>!s.lost); if(
       const to=a.text.split('\u2192').pop().trim(); const j=flow.findIndex(s=>s.label===to); if(j>i) i=j; } });
     if(i<0) i=0; for(let k=0;k<=i;k++) reached[k]++; });
   const closed=reached[reached.length-1]||0;
-  return flow.map((s,i)=>({key:s.key,label:s.label,color:s.color,count:reached[i],
+  return flow.map((s,i)=>({key:s.key,label:s.label,color:s.color,group:s.group,count:reached[i],
     rate:i===0?1:(reached[i-1]?reached[i]/reached[i-1]:0),
     closeRate:reached[i]?closed/reached[i]:0})); };
 const ACT_LABEL={Booked:'Meeting Booked'};
@@ -1164,6 +1164,8 @@ const CSS=`
 .fn-row.fn-head{font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#b7b4c6}
 .fn-head .fn-c,.fn-head .fn-r{text-align:right}
 .fn-l{font-size:12.5px;font-weight:700;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fn-group{display:flex;align-items:center;gap:8px;margin:4px 0 -1px;font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#9490ac}
+.fn-group::after{content:'';flex:1;height:1px;background:#EDEEF5}
 .fn-bar{height:11px;background:#F1F2F8;border-radius:20px;overflow:hidden}
 .fn-bar div{height:100%;border-radius:20px;transition:width .3s}
 .fn-c{font-size:13px;font-weight:800;color:${INK};text-align:right;font-family:'Space Grotesk',sans-serif}
@@ -1546,6 +1548,51 @@ function Login(){
   </div></div></>);
 }
 
+/* ===================== Terms of Service gate =====================
+   DRAFT wording — not reviewed by an attorney. Swap this constant for
+   counsel-reviewed language before this is relied on as a binding agreement. */
+const TOS_TEXT=`Terms of Service — ProyTech Business Suite (Triple J Mortgage)
+
+1. This software is provided to you as a tool to manage borrower relationships and loan pipeline data ("the CRM"). You are responsible for the accuracy of information you enter, and for complying with all applicable lending, privacy, and consumer-protection laws (including RESPA, TILA, and any state-specific requirements) in how you use it.
+
+2. You own the borrower and lead data you enter. ProyTech stores it on your behalf using Supabase (database) and Vercel (hosting), and does not sell or share it with third parties, except AI features you explicitly use (which send only the specific data you submit to Anthropic's Claude API for that request) and Google (only if you connect Calendar/Gmail yourself).
+
+3. AI-generated content — task rankings, drafted emails, "how do I" answers, CSV import mapping — is a drafting aid. You are responsible for reviewing anything AI-generated before it is sent to a client or relied upon; it is not guaranteed to be accurate or compliant.
+
+4. The CRM is provided "as is," without warranty of any kind. ProyTech is not liable for indirect, incidental, or consequential damages arising from use of the CRM, including data loss, missed follow-ups, or business interruption, to the maximum extent permitted by law.
+
+5. This is a single-seat subscription. Additional loan officer seats can be requested from ProyTech for an additional monthly fee.
+
+6. Either party may terminate this agreement at any time. Upon termination you may export your data at any time before the account is closed (Settings → Export Backup).
+
+By typing your name below and clicking "I agree," you confirm you have read and agree to these terms.`;
+
+const DEMO_OPEN_FLAG=(import.meta.env.VITE_DEMO_OPEN||'').toString().trim().toLowerCase()==='true';
+function TosGate({onSign}){
+  const [name,setName]=useState('');const [agree,setAgree]=useState(false);const [busy,setBusy]=useState(false);const [err,setErr]=useState('');
+  const go=async()=>{
+    if(!name.trim()){setErr('Type your full legal name to sign.');return;}
+    if(!agree){setErr('Check the box confirming you agree.');return;}
+    setBusy(true);setErr('');
+    try{ await onSign({name}); }
+    catch(e){ setErr(e.message||'Could not save your signature — try again.'); setBusy(false); }
+  };
+  return (<><style>{CSS}</style><div className="gate"><div className="gate-card" style={{maxWidth:560,textAlign:'left'}}>
+    <span className="nucleus" style={{width:18,height:18,margin:'0 auto 12px',display:'block'}}/>
+    <h2 style={{textAlign:'center'}}>Before you get started</h2>
+    <p style={{textAlign:'center'}}>Please review and sign the Terms of Service to continue.</p>
+    <div style={{whiteSpace:'pre-wrap',fontSize:12.5,lineHeight:1.6,color:'#4b4a63',background:'#F7F7FB',border:'1px solid #E8E9F2',borderRadius:10,padding:'14px 16px',maxHeight:260,overflowY:'auto',margin:'10px 0'}}>{TOS_TEXT}</div>
+    <input placeholder="Type your full legal name to sign" value={name} onChange={e=>{setName(e.target.value);setErr('');}}/>
+    <label style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:12.5,color:'#4b4a63',margin:'10px 2px'}}>
+      <input type="checkbox" checked={agree} onChange={e=>{setAgree(e.target.checked);setErr('');}} style={{marginTop:2}}/>
+      <span>I have read and agree to the Terms of Service above.</span>
+    </label>
+    {err&&<div className="gate-err">{err}</div>}
+    <button className="btn btn-p" style={{width:'100%',justifyContent:'center'}} disabled={busy} onClick={go}>{busy?'Signing…':'I agree — sign & continue'}</button>
+    {!DEMO_OPEN_FLAG&&<button className="btn btn-g btn-sm" style={{width:'100%',justifyContent:'center',marginTop:8}} onClick={()=>auth.logout()}>Sign out</button>}
+  </div></div></>);
+}
+
 /* ===================== main ===================== */
 export default function App(){
   /* VITE_DEMO_OPEN=true → no login screen: sign in anonymously in the background.
@@ -1560,6 +1607,7 @@ export default function App(){
   const [invoices,setInvoices]=useState([]);
   const [txns,setTxns]=useState([]);
   const [tasks,setTasks]=useState([]);
+  const [tosSignatures,setTosSignatures]=useState(null); // null = not loaded yet
   const [crmUsers,setCrmUsers]=useState([]);   // multi-user roster; empty = single-tenant, behaves as before
   const [gcal,setGcal]=useState({connected:false,email:'',loaded:false});
   const refreshGcal=async()=>{ try{ const r=await fetch('/api/google-status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
@@ -1600,6 +1648,7 @@ export default function App(){
       let iv=[]; try{ if(typeof db.getInvoices==='function') iv=await db.getInvoices(); }catch(err){ console.error('invoices load failed',err); }
       let tx=[]; try{ if(typeof db.getTxns==='function') tx=await db.getTxns(); }catch(err){ console.error('txns load failed',err); }
       let tk=[]; try{ if(typeof db.getTasks==='function') tk=await db.getTasks(); }catch(err){ console.error('tasks load failed',err); }
+      let ts=[]; try{ if(typeof db.getTosSignatures==='function') ts=await db.getTosSignatures(); }catch(err){ console.error('tos load failed',err); }
       let usr=[]; try{ if(typeof db.getUsers==='function') usr=await db.getUsers(); }catch(err){ /* table missing / RLS → single-tenant */ }
       setCrmUsers(Array.isArray(usr)?usr:[]);
       if(!s||!s.length){ s=seed(); await db.upsertMany(s); }
@@ -1610,7 +1659,7 @@ export default function App(){
       const mig=migrateStages(st,s);
       if(mig.stagesChanged){ st={...st,stages:mig.stages}; await db.saveSettings(st); }
       if(mig.changed.length){ s=mig.leads; try{ await db.upsertMany(mig.changed); }catch(err){ console.error('stage migration save failed',err); } }
-      setLeads(s); setInvoices(Array.isArray(iv)?iv:[]); setTxns(Array.isArray(tx)?tx:[]); setTasks(Array.isArray(tk)?tk:[]);
+      setLeads(s); setInvoices(Array.isArray(iv)?iv:[]); setTxns(Array.isArray(tx)?tx:[]); setTasks(Array.isArray(tk)?tk:[]); setTosSignatures(Array.isArray(ts)?ts:[]);
       setSettings({logo:st.logo||'',logoSize:st.logoSize||34,options:{...DEFAULT_OPTIONS,...(st.options||{})},stages:st.stages?.length?st.stages:LENDER_STAGES,customFields:st.customFields||[],team:st.team||DEFAULT_TEAM,clientPhases:st.clientPhases?.length?st.clientPhases:LENDER_CLIENT_PHASES,onboardingItems:Array.isArray(st.onboardingItems)&&st.onboardingItems.length?st.onboardingItems:LENDER_ONB_ITEMS,preset:st.preset||'lender',comp:{...DEFAULT_COMP,...(st.comp||{})},goals:{...DEFAULT_GOALS,...(st.goals||{})},huddle:st.huddle||null,modules:Array.isArray(st.modules)?st.modules:presetSettingsPatch(PRESETS.lender).modules,leadColumns:st.leadColumns||DEFAULT_LEAD_COLS,deliveryTracks:st.deliveryTracks?.length?st.deliveryTracks:LENDER_DELIVERY_TRACKS,invoicing:{...DEFAULT_INVOICING,...(st.invoicing||{}),biz:{...DEFAULT_INVOICING.biz,...((st.invoicing||{}).biz||{})}}});
       setLoaded(true);
     }catch(e){ console.error(e); window.alert('Could not load data: '+(e.message||e)); }
@@ -1683,6 +1732,12 @@ export default function App(){
   const saveTasks=n=>{ setTasks(n); if(typeof db.saveTasks==='function') db.saveTasks(n).catch(console.error); };
   const upsertTask=t=>{ const exists=tasks.some(x=>x.id===t.id); saveTasks(exists?tasks.map(x=>x.id===t.id?t:x):[t,...tasks]); };
   const deleteTask=id=>{ saveTasks(tasks.filter(x=>x.id!==id)); };
+  const signTos=async({name})=>{
+    const sig={uid:auth.uid(session),email:auth.email(session),name:(name||'').trim(),signedAt:new Date().toISOString()};
+    await db.saveTosSignature(sig);
+    setTosSignatures([...(tosSignatures||[]).filter(s=>s.uid!==sig.uid),sig]);
+    fetch('/api/tos-notify',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sig)}).catch(()=>{});
+  };
   const upsertInvoice=inv=>{ const exists=invoices.some(x=>x.id===inv.id); saveInvoices(exists?invoices.map(x=>x.id===inv.id?inv:x):[inv,...invoices]); };
   const deleteInvoice=id=>{ saveInvoices(invoices.filter(x=>x.id!==id)); setInvId(null); };
   const newInvoice=(lead)=>{ const ivset=settings.invoicing||DEFAULT_INVOICING; const number=(ivset.prefix||'INV-')+String(ivset.seq||1).padStart(4,'0'); saveSettings({...settings,invoicing:{...ivset,seq:(ivset.seq||1)+1}}); const issue=todayISO(); const inv={ id:uid(), number, clientId:lead?lead.id:'', billTo:lead?{name:lead.name||'',company:lead.company||'',email:lead.email||'',address:''}:{name:'',company:'',email:'',address:''}, issueDate:issue, dueDate:addDays(issue,ivset.terms||14), items:lead?itemsFromLead(lead):[{id:uid(),label:'',qty:1,amount:0}], taxRate:num(ivset.taxRate), notes:ivset.notes||'', paymentLink:ivset.paymentLink||'', status:'draft', paidDate:'', createdAt:new Date().toISOString() }; upsertInvoice(inv); setInvId(inv.id); };
@@ -1756,19 +1811,24 @@ export default function App(){
   </div></div></>);
   if(session===undefined) return (<><style>{CSS}</style><div className="gate"><div className="gate-card"><span className="nucleus" style={{width:18,height:18,margin:'0 auto 10px',display:'block'}}/><h2>{BRAND.title}</h2>{bootErr?<><p style={{color:'#b4322e',lineHeight:1.5}}>Can't reach the database. Your Supabase project may be paused — open the Supabase dashboard and restore it, then retry.</p><button className="btn btn-p" style={{width:'100%',justifyContent:'center',marginTop:6}} onClick={()=>window.location.reload()}>Retry</button></>:<p>Loading…</p>}</div></div></>);
   if(!session) return <Login/>;
+  const myUid=auth.uid(session);
+  const tosSigned=DEMO_OPEN||!loaded||(tosSignatures||[]).some(s=>s.uid===myUid);
+  if(!tosSigned) return <TosGate onSign={signTos}/>;
 
-  const NAV=[['dash','Dashboard',<LayoutDashboard size={18}/>],['huddle','Monday Huddle',<Sparkles size={18}/>],['followup','Follow-Up',<Bell size={18}/>],['tasks','Tasks',<ListTodo size={18}/>],['activity','Activity',<List size={18}/>],['pipeline','Pipeline',<KanbanSquare size={18}/>],['leads','Leads',<Contact2 size={18}/>],['rels','Partners',<Users size={18}/>],['clients','Loans',<Building2 size={18}/>],['aitools','AI Tools',<Sparkles size={18}/>],['invoices','Invoices',<Receipt size={18}/>],['books','The Books',<BookText size={18}/>],['money','Money',<DollarSign size={18}/>],['team','Team',<Users size={18}/>],['settings','Settings',<Settings size={18}/>]];
-  /* if a section is switched off while you're standing on it, fall back to the
+  const NAV=[['dash','Dashboard',<LayoutDashboard size={18}/>],['huddle','Monday Huddle',<Sparkles size={18}/>],['followup','Follow-Up',<Bell size={18}/>],['tasks','Tasks',<ListTodo size={18}/>],['activity','Activity',<List size={18}/>],['pipeline','Pipeline',<KanbanSquare size={18}/>],['leads','Leads',<Contact2 size={18}/>],['rels','Partners',<Users size={18}/>],['clients','Loans',<Building2 size={18}/>],['aitools','AI Tools',<Sparkles size={18}/>],['invoices','Invoices',<Receipt size={18}/>],['books','The Books',<BookText size={18}/>],['money','Money',<DollarSign size={18}/>],['settings','Settings',<Settings size={18}/>]];
+  /* Triple J is single-officer by design (seats are requested from Garrett, not
+     self-served) — the Team screen never shows here, regardless of canManageTeam.
+     if a section is switched off while you're standing on it, fall back to the
      dashboard. Computed during render — deliberately NOT a hook, because this
      sits after the auth early-returns above. */
-  const view=page==='team'?(canManageTeam?'team':'dash'):(modOn(settings,page)?page:'dash');
+  const view=page==='team'?'dash':(modOn(settings,page)?page:'dash');
   const titles={dash:['Dashboard','Your loan pipeline at a glance'],team:['Team','Add loan officers, set their role & pools — access is enforced in the database'],huddle:['Monday Morning Huddle','Last week, read and interpreted'],followup:['Follow-Up',"Clear every borrower that's due or overdue"],tasks:['Tasks','AI-ranked to-dos for your team'],activity:['Activity','Who did what — calls, texts, meetings & notes'],pipeline:['Pipeline','Drag a card to move a loan'],leads:['Leads','Every borrower, every conversation'],rels:['Referral Partners','The agents & partners who send you business — and who they introduced'],clients:['Loans in Process','Funded loans moving to the closing table'],invoices:['Invoices','Create, send & track payments'],books:['The Books','Money in, money out, draws & receipts'],money:['Money','Revenue, forecast & attribution'],settings:['Settings','Customize the CRM · back up your data']};
 
   return (<><style>{CSS}</style><div className="pt">
     {sbOpen&&<div className="scrim" onClick={()=>setSbOpen(false)}/>}
     <aside className={'sb '+(sbOpen?'open':'')}>
       <Brand logo={settings.logo} size={settings.logoSize||34} sub="Triple J Mortgage"/>
-      {NAV.filter(([k])=>k==='team'?canManageTeam:modOn(settings,k)).map(([k,l,ic])=><button key={k} className={'nav-i '+(view===k?'on':'')} onClick={()=>{setPage(k);setSbOpen(false);}}>{ic}{l}</button>)}
+      {NAV.filter(([k])=>modOn(settings,k)).map(([k,l,ic])=><button key={k} className={'nav-i '+(view===k?'on':'')} onClick={()=>{setPage(k);setSbOpen(false);}}>{ic}{l}</button>)}
       <button className="nav-i" style={{marginTop:8,background:'rgba(43,77,224,.16)',color:'#fff'}} onClick={()=>setActiveId('new')}><Plus size={18}/>New Lead</button>
       {!DEMO_OPEN&&<button className="nav-i" onClick={()=>auth.logout()}><LogOut size={18}/>Sign out ({me})</button>}
       <div className="sb-foot"><b>{BRAND.tagline}</b><br/>{BRAND.taglineSub}
@@ -2262,13 +2322,17 @@ function Dashboard({leads,stages,open,tagBooked,rels,settings}){
       <div className="funnel">
         <div className="fn-row fn-head"><span className="fn-l"></span><span></span><span className="fn-c">count</span><span className="fn-r">step</span><span className="fn-r">→ close</span></div>
         {m.funnel.map((f,i)=>{ const top=m.funnel[0].count||1;
-        return (<div className="fn-row" key={f.key}>
-          <span className="fn-l">{f.label}</span>
-          <div className="fn-bar"><div style={{width:Math.max(2,Math.round(f.count/top*100))+'%',background:f.color||COBALT}}/></div>
-          <span className="fn-c">{f.count}</span>
-          <span className="fn-r">{i===0?'—':Math.round(f.rate*100)+'%'}</span>
-          <span className={'fn-r close'+(i>0&&f.closeRate<0.5?' warn':'')}>{i===m.funnel.length-1?'—':Math.round(f.closeRate*100)+'%'}</span>
-        </div>); })}</div>
+        const newGroup=f.group&&(i===0||f.group!==m.funnel[i-1].group);
+        return (<React.Fragment key={f.key}>
+          {newGroup&&<div className="fn-group">{f.group}</div>}
+          <div className="fn-row">
+            <span className="fn-l">{f.label}</span>
+            <div className="fn-bar"><div style={{width:Math.max(2,Math.round(f.count/top*100))+'%',background:f.color||COBALT}}/></div>
+            <span className="fn-c">{f.count}</span>
+            <span className="fn-r">{i===0?'—':Math.round(f.rate*100)+'%'}</span>
+            <span className={'fn-r close'+(i>0&&f.closeRate<0.5?' warn':'')}>{i===m.funnel.length-1?'—':Math.round(f.closeRate*100)+'%'}</span>
+          </div>
+        </React.Fragment>); })}</div>
     </div>}
 
     {/* higher-order sales analytics — the numbers a sales leader actually runs on */}
@@ -3525,6 +3589,30 @@ function Team({users,me,meUser,multiUser,sessionUid,sessionEmail,pools,onAdd,onU
   </>);
 }
 
+function ChangePasswordCard(){
+  const [pw,setPw]=useState('');const [pw2,setPw2]=useState('');const [err,setErr]=useState('');const [msg,setMsg]=useState('');const [busy,setBusy]=useState(false);
+  const go=async()=>{
+    setErr('');setMsg('');
+    if(pw.length<8){setErr('Use at least 8 characters.');return;}
+    if(pw!==pw2){setErr('Passwords don’t match.');return;}
+    setBusy(true);
+    try{ const {error}=await auth.updatePassword(pw); if(error)throw error; setMsg('Password updated.'); setPw('');setPw2(''); }
+    catch(e){ setErr(e.message||'Could not update your password.'); }
+    setBusy(false);
+  };
+  return (<div className="card" style={{marginBottom:18}}>
+    <div className="sec-title"><Lock size={15}/>Your password</div>
+    <div className="ch-sub" style={{marginTop:-8,marginBottom:14}}>Set your own password any time — you don’t need to know the one used to create this account.</div>
+    <div className="fgrid">
+      <div className="field"><label>New password</label><input type="password" value={pw} autoComplete="new-password" onChange={e=>{setPw(e.target.value);setErr('');setMsg('');}}/></div>
+      <div className="field"><label>Confirm new password</label><input type="password" value={pw2} autoComplete="new-password" onChange={e=>{setPw2(e.target.value);setErr('');setMsg('');}} onKeyDown={e=>e.key==='Enter'&&go()}/></div>
+    </div>
+    {err&&<div className="gate-err" style={{marginTop:8}}>{err}</div>}
+    {msg&&<div className="subcell" style={{marginTop:8,color:GREEN}}>{msg}</div>}
+    <button className="btn btn-p" style={{marginTop:10}} disabled={busy||!pw||!pw2} onClick={go}><Lock size={15}/>{busy?'Saving…':'Update password'}</button>
+  </div>);
+}
+
 function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoices,gcal,onDisconnectGcal,refreshGcal,applyPreset}){
   const onLogo=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>saveSettings({...settings,logo:r.result});r.readAsDataURL(f);};
   const setOptions=(key,arr)=>saveSettings({...settings,options:{...settings.options,[key]:arr}});
@@ -3532,6 +3620,8 @@ function SettingsPage({settings,saveSettings,leads,saveLeads,invoices,saveInvoic
   const importAll=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!d.leads)throw 0;if(window.confirm(`Restore ${d.leads.length} leads from this backup? This replaces everything currently in the CRM.`)){saveLeads(d.leads);if(d.settings)saveSettings({logo:d.settings.logo||'',logoSize:d.settings.logoSize||34,options:{...DEFAULT_OPTIONS,...(d.settings.options||{})},stages:d.settings.stages?.length?d.settings.stages:LENDER_STAGES,customFields:d.settings.customFields||[],team:d.settings.team||DEFAULT_TEAM,clientPhases:d.settings.clientPhases||LENDER_CLIENT_PHASES,onboardingItems:Array.isArray(d.settings.onboardingItems)&&d.settings.onboardingItems.length?d.settings.onboardingItems:LENDER_ONB_ITEMS,preset:d.settings.preset||'lender',comp:{...DEFAULT_COMP,...(d.settings.comp||{})},goals:{...DEFAULT_GOALS,...(d.settings.goals||{})},huddle:d.settings.huddle||null,modules:Array.isArray(d.settings.modules)?d.settings.modules:presetSettingsPatch(PRESETS.lender).modules,leadColumns:d.settings.leadColumns||DEFAULT_LEAD_COLS,deliveryTracks:d.settings.deliveryTracks?.length?d.settings.deliveryTracks:LENDER_DELIVERY_TRACKS,invoicing:{...DEFAULT_INVOICING,...(d.settings.invoicing||{}),biz:{...DEFAULT_INVOICING.biz,...((d.settings.invoicing||{}).biz||{})}}});if(saveInvoices)saveInvoices(Array.isArray(d.invoices)?d.invoices:[]);window.alert('Backup restored.');}}catch(err){window.alert('That file is not a valid ProyTech backup.');}};r.readAsText(f);e.target.value='';};
 
   return (<>
+    <ChangePasswordCard/>
+
     {/* team access */}
     {(()=>{ const people=(settings.options?.owner||OWNERS).filter(o=>o!==POOL_OWNER);
       const setAccess=(name,access)=>{ const t=(settings.team||[]).filter(x=>x.name!==name); saveSettings({...settings,team:[...t,{name,access}]}); };

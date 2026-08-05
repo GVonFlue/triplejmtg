@@ -34,6 +34,9 @@ export const auth = {
   email(session) { return session?.user?.email || ''; },
   /* let a signed-in user set/reset their own password (used by password reset flow) */
   sendReset(email) { return supabase.auth.resetPasswordForEmail((email||'').trim().toLowerCase()); },
+  /* self-service: a signed-in user changes their own password from Settings.
+     No "current password" needed — the active session already proves who they are. */
+  updatePassword(newPassword) { return supabase.auth.updateUser({ password: newPassword }); },
 };
 
 /* ---- data: leads as JSON rows + one shared settings row ----
@@ -143,6 +146,19 @@ export const db = {
   },
   async saveTasks(list) {
     const { error } = await supabase.from('app_settings').upsert({ id: 'tasks', data: { list } });
+    if (error) throw error;
+  },
+  /* ---- Terms of Service signatures — one row, a list so a future multi-seat
+     install has every officer's own signature, not just the first person in. ---- */
+  async getTosSignatures() {
+    const { data, error } = await supabase.from('app_settings').select('data').eq('id', 'tos').maybeSingle();
+    if (error) throw error;
+    return (data?.data?.list) || [];
+  },
+  async saveTosSignature(sig) {
+    const list = await db.getTosSignatures();
+    const next = [...list.filter(s => s.uid !== sig.uid), sig];
+    const { error } = await supabase.from('app_settings').upsert({ id: 'tos', data: { list: next } });
     if (error) throw error;
   },
   /* ---- receipt files live in Supabase Storage (bucket 'receipts'), NOT in the DB ---- */
