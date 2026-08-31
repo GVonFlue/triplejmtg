@@ -10,6 +10,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'import-leads', perIp: 20, windowMin: 10, perDay: 600,
+    module: 'leads',
     maxChars: 60000, requireAuth: true,
   });
   if (!gate.ok) return;

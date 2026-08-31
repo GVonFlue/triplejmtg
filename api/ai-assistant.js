@@ -29,6 +29,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'ai-assistant', perIp: 30, windowMin: 10, perDay: 1000,
+    module: 'assistant',
     maxChars: 4000, requireAuth: true,
   });
   if (!gate.ok) return;

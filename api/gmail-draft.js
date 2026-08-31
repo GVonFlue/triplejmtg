@@ -13,6 +13,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'gmail-draft', perIp: 30, windowMin: 10, perDay: 600,
+    module: 'assistant',
     maxChars: 60000, requireAuth: true,
   });
   if (!gate.ok) return;

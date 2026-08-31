@@ -71,6 +71,17 @@ test('platform code is imported from the package, not re-copied', () => {
     `these are back as local copies and will drift from the package: ${local.join(', ')}`);
 });
 
+test('every sellable route declares the module it belongs to', () => {
+  // A route with no `module:` can never be gated, so the tier that is sold on
+  // it is unenforceable — the tab hides and the endpoint keeps answering. These
+  // are the routes that belong to a section on the price list.
+  const SELLABLE = ['ai-assistant.js', 'ai-tools.js', 'huddle.js', 'rank-tasks.js',
+                    'parse-receipt.js', 'import-leads.js', 'gmail-draft.js'];
+  const ungated = SELLABLE.filter(f => !/module: '[a-z-]+'/.test(readFileSync(join(API, f), 'utf8')));
+  assert.deepEqual(ungated, [],
+    `these belong to a sellable section but declare no module: ${ungated.join(', ')}`);
+});
+
 test('no route asks for a role by name', () => {
   // Which role is an admin is ADMIN_ROLES on the deployment. A hardcoded name
   // here is the bug that shipped into Dwell asking for 'owner' and matching

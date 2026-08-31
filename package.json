@@ -11,7 +11,7 @@
     "migrate": "proytech-migrate"
   },
   "dependencies": {
-    "@getproytech/core": "file:../../core/getproytech-core-0.1.1.tgz",
+    "@getproytech/core": "file:../../core/getproytech-core-0.2.0.tgz",
     "@supabase/supabase-js": "^2.45.4",
     "jszip": "^3.10.1",
     "lucide-react": "^0.383.0",

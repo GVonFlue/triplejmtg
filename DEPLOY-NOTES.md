@@ -34,3 +34,34 @@ Adds `core_whoami()`, which `requireAdmin` reads. This install's own
 reads it.
 
 Check first with `npm run migrate -- --status`.
+
+## 4. MODULES — what this install bought
+
+    MODULES=leads,tasks,assistant,huddle,books
+
+The ceiling. Only the operator can change it, because only the operator has the
+Vercel project. `settings.modules` shapes the install *within* it and can never
+widen it — which matters, because a leader has write access to `app_settings` by
+design, so a gate that lived only there would be an upgrade button.
+
+**Unset means no ceiling** and every module is allowed. That is the right
+default for an install that predates tiering, and the opposite of `ADMIN_ROLES`,
+where unset means nobody is an admin. One is a product decision, the other is a
+permission.
+
+`VITE_MODULES` is accepted as the same variable — the browser already reads that
+name to hide the tab, and two variables would drift invisibly.
+
+### Upgrading a client mid-month
+
+1. Vercel → project → Settings → Environment Variables → edit `MODULES`, add the
+   keys. Apply to Production **and** Preview.
+2. Deployments → the current production deployment → **Redeploy**.
+3. Tell them to reload.
+
+Roughly two minutes, no code change, no migration. The redeploy is required and
+not optional: `VITE_MODULES` is compiled into the browser bundle at build time,
+so changing the variable alone leaves the old bundle serving the old sidebar.
+The server half picks it up the moment the new deployment goes live.
+
+Downgrading is the same three steps in reverse, and takes effect the same way.

@@ -10,6 +10,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'parse-receipt', perIp: 30, windowMin: 10, perDay: 900,
+    module: 'books',
     maxChars: 5000000, requireAuth: true,
   });
   if (!gate.ok) return;
