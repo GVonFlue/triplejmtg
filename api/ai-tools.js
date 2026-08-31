@@ -22,8 +22,8 @@ async function claude(key, { system, user, max = 700 }) {
 }
 const parseJson = t => { try { return JSON.parse(t.replace(/```json|```/g, '').trim()); } catch { return null; } };
 
-import { guard, sweep } from '@proytech/core/guard';
-import { checkBudget, recordSpend } from '@proytech/core/budget';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // Bodies carry real borrower rows, so this was also a data-exfiltration

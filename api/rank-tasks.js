@@ -5,8 +5,8 @@
 // NOTE: the sister install (Dwellbusinesssuite PR #3) DELETED this endpoint as
 // live, LLM-calling and called by nothing. Here it is genuinely called, from
 // the Tasks screen (src/App.jsx). So it is guarded, not removed.
-import { guard, sweep } from '@proytech/core/guard';
-import { checkBudget, recordSpend } from '@proytech/core/budget';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.

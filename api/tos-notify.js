@@ -4,7 +4,7 @@
 // just a courtesy notification, so it fails silently and never blocks signing.
 // Requires env var RESEND_API_KEY (https://resend.com — free tier is plenty for
 // this volume). Optional TOS_NOTIFY_EMAIL overrides the default recipient.
-import { guard, sweep } from '@proytech/core/guard';
+import { guard, sweep } from '@getproytech/core/guard';
 
 export default async function handler(req, res) {
   // Signed-in only: the signature it reports is already written to

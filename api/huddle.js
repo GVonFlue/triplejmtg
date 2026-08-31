@@ -9,8 +9,8 @@
 // is judgement rather than extraction, and it runs once a week, so the cost
 // difference is a rounding error.
 
-import { guard, sweep } from '@proytech/core/guard';
-import { checkBudget, recordSpend } from '@proytech/core/budget';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // Sonnet, weekly. Low per-IP ceiling because nobody needs six of these.

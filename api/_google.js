@@ -8,7 +8,7 @@
 // The refresh token lives in a `secrets` table that Row Level Security blocks
 // from the browser; only the service-role key (here on the server) can read it.
 import { createClient } from '@supabase/supabase-js';
-import { supaUrl, supaKey } from '@proytech/core/env';
+import { supaUrl, supaKey } from '@getproytech/core/env';
 
 export const OAUTH_SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',

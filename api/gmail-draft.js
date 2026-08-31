@@ -1,7 +1,7 @@
 // Creates a DRAFT in the connected Google account's Gmail (never sends — the loan
 // officer reviews and sends it himself). Reuses the same OAuth connection as Calendar.
 // POST body: { to, subject, body, fromName? }  ->  { ok, draftId } | { ok:false, error }
-import { guard, sweep } from '@proytech/core/guard';
+import { guard, sweep } from '@getproytech/core/guard';
 import { getAccessToken } from './_google.js';
 
 // RFC-2047 encode a header value that may contain non-ASCII (names, subjects).

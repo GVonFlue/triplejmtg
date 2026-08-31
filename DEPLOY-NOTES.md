@@ -1,4 +1,4 @@
-# Deploy notes — consuming @proytech/core
+# Deploy notes — consuming @getproytech/core
 
 Two things must be true on the deployment before this branch will work, and
 neither is in the code.

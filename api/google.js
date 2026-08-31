@@ -28,7 +28,7 @@
 // were deleted with this change. They were unreferenced duplicates of the three
 // branches below — the merge described above added google.js but never removed
 // the originals, so they were still deployed, still routable, and still open.
-import { guard, sweep } from '@proytech/core/guard';
+import { guard, sweep } from '@getproytech/core/guard';
 import { OAUTH_SCOPES, redirectUri, loadGoogle, clearGoogle } from './_google.js';
 
 async function doAuth(req, res) {

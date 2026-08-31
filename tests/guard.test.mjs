@@ -5,7 +5,7 @@
    -------------------------------------
    The behaviour of the guard and the spend ceiling — 401 on a missing token,
    403 on a wrong role, failing closed on an unreadable ledger, the rate card —
-   is now tested in @proytech/core, once, against all three installs' rules. It
+   is now tested in @getproytech/core, once, against all three installs' rules. It
    was tested here too, in a copy, and that copy would have drifted from the
    package the first time either changed. Duplicated tests are the same problem
    as duplicated code, one layer up.
@@ -55,7 +55,7 @@ test('every AI route checks the budget before it spends', () => {
 });
 
 test('nothing imports the deleted local copies', () => {
-  // _guard.js, _env.js, _spend.js and _budget.js now live in @proytech/core.
+  // _guard.js, _env.js, _spend.js and _budget.js now live in @getproytech/core.
   // A leftover relative import would resolve to nothing and fail at runtime, in
   // production, on the first request rather than at build time.
   for (const f of readdirSync(API).filter(n => n.endsWith('.js'))) {
@@ -93,11 +93,13 @@ test('no browser call to /api bypasses the token helper', () => {
 });
 
 test('the .npmrc that resolves the private package is committed', () => {
-  // Without it npm falls through to PUBLIC npm, where the @proytech scope is
-  // unclaimed. Today that is a clean 404. The day somebody registers that scope
-  // it becomes an install of their code into this CRM, with a service key.
+  // Without it npm falls through to PUBLIC npm. The @getproytech scope IS ours
+  // there, which is what keeps that fall-through a clean 404 rather than an
+  // install of somebody else's code next to a service key — and it is why
+  // nothing named 'core' is published publicly: a real-but-empty package would
+  // turn this loud build failure into a green deploy that 500s at runtime.
   const npmrc = readFileSync(join(ROOT, '.npmrc'), 'utf8');
-  assert.match(npmrc, /@proytech:registry=https:\/\/npm\.pkg\.github\.com/);
+  assert.match(npmrc, /@getproytech:registry=https:\/\/npm\.pkg\.github\.com/);
   assert.match(npmrc, /_authToken=\$\{NPM_TOKEN\}/,
     'the token must come from the environment, never be committed');
   assert.doesNotMatch(npmrc, /ghp_|github_pat_/, 'a real token is committed in .npmrc');
