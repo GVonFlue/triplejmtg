@@ -1,6 +1,9 @@
 // Dashboard "How do I…?" helper. Answers questions about USING the CRM only — it has
 // no access to loan data, so it's safe and cheap. Its knowledge is the guide below.
 // POST body: { question }  ->  { ok, answer }
+import { guard, sweep } from './_guard.js';
+import { checkBudget, recordSpend } from './_budget.js';
+
 const GUIDE = `
 You are the in-app help assistant for the ProyTech Business Suite — a CRM built for a mortgage loan officer (Triple J Mortgage). Answer ONLY questions about how to use the CRM. Keep answers short, friendly, and concrete (2-5 sentences). If asked something you can't know (a borrower's data, outside facts), say you only help with how to use the CRM. Never invent features that aren't listed here.
 
@@ -19,8 +22,22 @@ How the CRM works:
 - Request another seat: Settings -> Your Plan & Seats -> Request a seat ($25/mo).
 `;
 
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // The help bot reaches no CRM data, but it does reach api.anthropic.com on
+  // our key, and that is the whole reason this is not public.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'ai-assistant', perIp: 30, windowMin: 10, perDay: 1000,
+    maxChars: 4000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
+  // One ceiling for the whole install, checked before we spend. See _budget.js.
+  const over = await checkBudget();
+  if (over) { res.status(over.status).json(over.body); return; }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'AI not configured' }); return; }
   try {
@@ -36,6 +53,9 @@ export default async function handler(req, res) {
     });
     if (!r.ok) { res.status(200).json({ ok: false, error: 'AI request failed' }); return; }
     const data = await r.json();
+    // Bill it to the shared ledger before we shape the reply — the tokens are
+    // spent either way, and an unrecorded call is a hole in the ceiling.
+    await recordSpend('claude-haiku-4-5-20251001', data && data.usage);
     const answer = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
     res.status(200).json({ ok: true, answer });
   } catch (e) {

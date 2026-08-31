@@ -1,0 +1,8 @@
+# This repo had no .gitignore. `npm install` + `npm run build` therefore made
+# node_modules/ and dist/ look like ~11,000 new files to commit.
+node_modules/
+dist/
+.env
+.env.local
+.vercel
+.DS_Store

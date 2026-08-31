@@ -4,8 +4,19 @@
 // just a courtesy notification, so it fails silently and never blocks signing.
 // Requires env var RESEND_API_KEY (https://resend.com — free tier is plenty for
 // this volume). Optional TOS_NOTIFY_EMAIL overrides the default recipient.
+import { guard, sweep } from './_guard.js';
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // Signed-in only: the signature it reports is already written to
+  // app_settings by an authenticated browser before this is called.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'tos-notify', perIp: 5, windowMin: 10, perDay: 200,
+    maxChars: 4000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
   const key = process.env.RESEND_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'Email not configured (RESEND_API_KEY unset) — signature is still saved in the database.' }); return; }
 

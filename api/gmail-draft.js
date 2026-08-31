@@ -1,6 +1,7 @@
 // Creates a DRAFT in the connected Google account's Gmail (never sends — the loan
 // officer reviews and sends it himself). Reuses the same OAuth connection as Calendar.
 // POST body: { to, subject, body, fromName? }  ->  { ok, draftId } | { ok:false, error }
+import { guard, sweep } from './_guard.js';
 import { getAccessToken } from './_google.js';
 
 // RFC-2047 encode a header value that may contain non-ASCII (names, subjects).
@@ -8,7 +9,15 @@ function enc(s) { return '=?UTF-8?B?' + Buffer.from(String(s || ''), 'utf8').toS
 const b64url = buf => Buffer.from(buf, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // Unauthenticated this created drafts in the connected Gmail account.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'gmail-draft', perIp: 30, windowMin: 10, perDay: 600,
+    maxChars: 60000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
   try {
     const token = await getAccessToken();
     if (!token) { res.status(200).json({ ok: false, error: 'not_connected' }); return; }

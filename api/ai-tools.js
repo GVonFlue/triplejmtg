@@ -13,13 +13,32 @@ async function claude(key, { system, user, max = 700 }) {
     body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: max, system, messages: [{ role: 'user', content: user }] }),
   });
   if (!r.ok) throw new Error('AI request failed (' + r.status + ')');
+  // Metered here rather than in the handler: one request can run this helper
+  // several times (draft_email loops over up to eight leads), and a ceiling
+  // that only counted the first call would be off by a factor of eight.
   const d = await r.json();
+  await recordSpend('claude-haiku-4-5-20251001', d && d.usage);
   return (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
 }
 const parseJson = t => { try { return JSON.parse(t.replace(/```json|```/g, '').trim()); } catch { return null; } };
 
+import { guard, sweep } from './_guard.js';
+import { checkBudget, recordSpend } from './_budget.js';
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // Bodies carry real borrower rows, so this was also a data-exfiltration
+  // endpoint, not only a billing one.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'ai-tools', perIp: 30, windowMin: 10, perDay: 900,
+    maxChars: 60000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
+  const over = await checkBudget();
+  if (over) { res.status(over.status).json(over.body); return; }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'AI not configured' }); return; }
   try {
