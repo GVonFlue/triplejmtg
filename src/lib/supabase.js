@@ -51,6 +51,34 @@ const fromRow = r => { const base = { ...r.data, id: r.id };
   if ('owner_id' in r && r.owner_id != null) base.owner_id = r.owner_id;
   if ('pool' in r && r.pool != null) base.pool = r.pool;
   return base; };
+/* ---- calling our own /api routes ----------------------------------------
+   EVERY /api route that touches data, Google or Anthropic now requires a real
+   Supabase session (api/_guard.js, requireAuth). The token is not automatic:
+   fetch() sends no Authorization header of its own, so a plain fetch('/api/x')
+   gets a 401 no matter who is signed in.
+
+   This is the one place that attaches it. Use it for every /api call — a bare
+   fetch to a guarded route is now a bug, and it is a quiet one, because the
+   endpoints answer 200 with { ok:false } for most failures and the screen just
+   shows nothing.
+
+   Sends the CURRENT token, read at call time rather than captured once:
+   Supabase refreshes the access token roughly hourly, and a token captured at
+   sign-in is expired by lunchtime. */
+export async function api(path, body) {
+  let token = '';
+  try { const { data } = await supabase.auth.getSession(); token = data?.session?.access_token || ''; }
+  catch { /* no session — send it unauthenticated and let the endpoint answer 401 */ }
+  return fetch(path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 export const db = {
   async getLeads() {
     let res = await supabase.from('leads').select('id,data,owner_id,pool');

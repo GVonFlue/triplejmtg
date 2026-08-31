@@ -9,8 +9,23 @@
 // is judgement rather than extraction, and it runs once a week, so the cost
 // difference is a rounding error.
 
+import { guard, sweep } from './_guard.js';
+import { checkBudget, recordSpend } from './_budget.js';
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // Sonnet, weekly. Low per-IP ceiling because nobody needs six of these.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'huddle', perIp: 6, windowMin: 10, perDay: 300,
+    maxChars: 60000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
+  // One ceiling for the whole install, checked before we spend. See _budget.js.
+  const over = await checkBudget();
+  if (over) { res.status(over.status).json(over.body); return; }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'ANTHROPIC_API_KEY not set' }); return; }
 
@@ -56,6 +71,9 @@ Return ONLY valid JSON, no markdown fences, no preamble:
       }),
     });
     const j = await r.json();
+    // Bill it to the shared ledger before we shape the reply — the tokens are
+    // spent either way, and an unrecorded call is a hole in the ceiling.
+    await recordSpend('claude-sonnet-4-6', j && j.usage);
     if (!r.ok) { res.status(200).json({ ok: false, error: (j.error && j.error.message) || 'api error' }); return; }
 
     let text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();

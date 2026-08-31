@@ -2,8 +2,23 @@
 // Requires env var ANTHROPIC_API_KEY (set in Vercel → Project → Settings → Environment Variables).
 // The key NEVER reaches the browser; it only lives here on the server.
 
+import { guard, sweep } from './_guard.js';
+import { checkBudget, recordSpend } from './_budget.js';
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
+  // maxChars is huge on purpose: the body is a base64 image or PDF.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'parse-receipt', perIp: 30, windowMin: 10, perDay: 900,
+    maxChars: 5000000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
+  // One ceiling for the whole install, checked before we spend. See _budget.js.
+  const over = await checkBudget();
+  if (over) { res.status(over.status).json(over.body); return; }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'AI not configured' }); return; }
 
@@ -30,6 +45,9 @@ export default async function handler(req, res) {
     });
     if (!r.ok) { const t = await r.text(); res.status(200).json({ ok: false, error: 'AI request failed', detail: t.slice(0, 300) }); return; }
     const data = await r.json();
+    // Bill it to the shared ledger before we shape the reply — the tokens are
+    // spent either way, and an unrecorded call is a hole in the ceiling.
+    await recordSpend('claude-haiku-4-5-20251001', data && data.usage);
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').replace(/```json|```/g, '').trim();
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { parsed = null; }

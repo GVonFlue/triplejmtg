@@ -2,12 +2,21 @@
 // POST body to create: { title, start, end, notes, attendees:[email], meet:bool, timezone }
 // POST body to delete: { action:'delete', eventId }
 // start/end are local wall-clock strings 'YYYY-MM-DDTHH:MM:SS'; timezone names the zone.
+import { guard, sweep } from './_guard.js';
 import { getAccessToken } from './_google.js';
 
 const CAL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'POST only' }); return; }
+  // Unauthenticated this wrote events into the connected Google Calendar.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'calendar-event', perIp: 40, windowMin: 10, perDay: 1500,
+    maxChars: 20000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
   try {
     const token = await getAccessToken();
     if (!token) { res.status(200).json({ ok: false, error: 'not_connected' }); return; }

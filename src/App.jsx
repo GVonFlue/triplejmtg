@@ -14,7 +14,7 @@ import {
   Users, Link2, UserPlus, Expand, Video, CalendarCheck, Zap, Clipboard
 } from 'lucide-react';
 import JSZip from 'jszip';
-import { auth, db, configured } from './lib/supabase';
+import { auth, db, configured, api } from './lib/supabase';
 import { BRAND } from './lib/brand';
 
 /* ===================== brand ===================== */
@@ -1615,21 +1615,21 @@ export default function App(){
   const [tosSignatures,setTosSignatures]=useState(null); // null = not loaded yet
   const [crmUsers,setCrmUsers]=useState([]);   // multi-user roster; empty = single-tenant, behaves as before
   const [gcal,setGcal]=useState({connected:false,email:'',loaded:false});
-  const refreshGcal=async()=>{ try{ const r=await fetch('/api/google?action=status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
+  const refreshGcal=async()=>{ try{ const r=await api('/api/google?action=status'); const j=await r.json(); setGcal({connected:!!j.connected,email:j.email||'',loaded:true}); }catch{ setGcal(g=>({...g,loaded:true})); } };
   useEffect(()=>{ refreshGcal();
     const p=new URLSearchParams(window.location.search);
     if(p.get('gcal')){ const u=new URL(window.location.href); u.searchParams.delete('gcal'); u.searchParams.delete('reason'); window.history.replaceState({},'',u.pathname+u.search); }
   },[]);
-  const disconnectGcal=async()=>{ try{ await fetch('/api/google?action=disconnect',{method:'POST'}); }catch{} setGcal({connected:false,email:'',loaded:true}); };
+  const disconnectGcal=async()=>{ try{ await api('/api/google?action=disconnect'); }catch{} setGcal({connected:false,email:'',loaded:true}); };
   /* creates the event on Google Calendar; returns {eventId,htmlLink,meetLink}. Persistence
      of the meeting onto the lead happens in the Modal (single patch) to avoid clobbering. */
   const createCalendarEvent=async(m)=>{
-    const r=await fetch('/api/calendar-event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:m.title,start:m.start,end:m.end,notes:m.notes,attendees:m.attendees,meet:m.meet,timezone:'America/Chicago'})});
+    const r=await api('/api/calendar-event',{title:m.title,start:m.start,end:m.end,notes:m.notes,attendees:m.attendees,meet:m.meet,timezone:'America/Chicago'});
     const j=await r.json().catch(()=>({ok:false,error:'bad response'}));
     if(!j.ok) throw new Error(j.error==='not_connected'?'Google Calendar isn’t connected — connect it in Settings.':(j.error||'Could not create the event'));
     return {eventId:j.eventId,htmlLink:j.htmlLink||'',meetLink:j.meetLink||''};
   };
-  const deleteCalendarEvent=async(eventId)=>{ if(!eventId)return; try{ await fetch('/api/calendar-event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'delete',eventId})}); }catch{} };
+  const deleteCalendarEvent=async(eventId)=>{ if(!eventId)return; try{ await api('/api/calendar-event',{action:'delete',eventId}); }catch{} };
   const [invId,setInvId]=useState(null);
   const [settings,setSettings]=useState(()=>({logo:'',logoSize:34,options:DEFAULT_OPTIONS,customFields:[],leadColumns:DEFAULT_LEAD_COLS,invoicing:DEFAULT_INVOICING,team:DEFAULT_TEAM,...presetSettingsPatch(PRESETS.lender)}));
   const [page,setPage]=useState('dash');
@@ -1741,7 +1741,7 @@ export default function App(){
     const sig={uid:auth.uid(session),email:auth.email(session),name:(name||'').trim(),signedAt:new Date().toISOString()};
     await db.saveTosSignature(sig);
     setTosSignatures([...(tosSignatures||[]).filter(s=>s.uid!==sig.uid),sig]);
-    fetch('/api/tos-notify',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sig)}).catch(()=>{});
+    api('/api/tos-notify',sig).catch(()=>{});
   };
   const upsertInvoice=inv=>{ const exists=invoices.some(x=>x.id===inv.id); saveInvoices(exists?invoices.map(x=>x.id===inv.id?inv:x):[inv,...invoices]); };
   const deleteInvoice=id=>{ saveInvoices(invoices.filter(x=>x.id!==id)); setInvId(null); };
@@ -1999,8 +1999,12 @@ function PipelineStatus({m}){
 function DashHelper(){
   const [q,setQ]=useState(''); const [a,setA]=useState(''); const [busy,setBusy]=useState(false); const [open,setOpen]=useState(false);
   const ask=async()=>{ if(!q.trim())return; setBusy(true); setA('');
-    try{ const r=await fetch('/api/ai-assistant',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({question:q})}).then(r=>r.json());
-      setA(r.ok?r.answer:(r.error==='AI not configured'?'The AI helper turns on once your ANTHROPIC_API_KEY is set in Vercel.':'Sorry — could not reach the helper.'));
+    try{ const r=await api('/api/ai-assistant',{question:q}).then(r=>r.json());
+      /* r.capped is the monthly AI budget (api/_budget.js), not a fault. Its
+         message is written for the person reading it, so show it verbatim —
+         folding it into "could not reach the helper" turns a budget into a
+         support call. */
+      setA(r.ok?r.answer:(r.capped?r.error:(r.error==='AI not configured'?'The AI helper turns on once your ANTHROPIC_API_KEY is set in Vercel.':'Sorry — could not reach the helper.')));
     }catch{ setA('The AI helper works on the deployed site.'); } setBusy(false); };
   return (<div className={'dh-help'+(open?' open':'')}>
     <div className="dh-bar" onClick={()=>setOpen(o=>!o)}><Sparkles size={14}/><span>Ask how to do something in the CRM</span><ChevronDown size={15} style={{marginLeft:'auto',transform:open?'rotate(180deg)':'none'}}/></div>
@@ -2021,7 +2025,9 @@ function AITools({leads,stages,settings,gcalConnected,open}){
   const openL=leads.filter(l=>sOf(l.stage,stages).open);
   const coldLeads=openL.filter(l=>daysSince(lastTouchTs(l)||l.createdAt||todayISO())>=45);
   const expiring=leads.filter(l=>l.preApprovalExp&&daysUntil(l.preApprovalExp)>=0&&daysUntil(l.preApprovalExp)<=30);
-  const post=(url,body)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  /* every /api route here is guarded (api/_guard.js) — api() attaches the
+     Supabase access token, which a bare fetch does not. */
+  const post=(url,body)=>api(url,body).then(r=>r.json());
   const officer=(settings&&settings.team&&settings.team[0])||'';
   const aiOffMsg='AI turns on once your ANTHROPIC_API_KEY is set in Vercel and the site is deployed.';
   const runDrafts=async(list,kind,tag)=>{ setErr('');setDrafts(null);setCallList(null);
@@ -2031,6 +2037,7 @@ function AITools({leads,stages,settings,gcalConnected,open}){
       for(const l of list.slice(0,8)){ const r=await post('/api/ai-tools',{tool:'draft_email',kind,officer,
         lead:{name:l.name,loanPurpose:l.loanPurpose,loanType:l.loanType,dealValue:l.dealValue,note:l.nextSteps||'',stageLabel:sOf(l.stage,stages).label,lastContact:l.followUp}});
         if(r.ok) out.push({lead:l,subject:r.subject,body:r.body,saved:false});
+        else if(r.capped){setErr(r.error);break;}
         else if(r.error==='AI not configured'){setErr(aiOffMsg);break;} }
       setDrafts(out);
     }catch(e){setErr('Could not reach the AI service (works on the deployed site).');}
@@ -2039,7 +2046,7 @@ function AITools({leads,stages,settings,gcalConnected,open}){
   const runCallList=async()=>{ setErr('');setDrafts(null);setCallList(null);setBusy('call');
     try{ const payload=openL.slice(0,40).map(l=>({name:l.name,stage:sOf(l.stage,stages).label,followUp:l.followUp,preApprovalExp:l.preApprovalExp,rateLockExp:l.rateLockExp,priority:l.priority,daysSinceTouch:daysSince(lastTouchTs(l)||l.createdAt||todayISO()),amount:l.dealValue}));
       const r=await post('/api/ai-tools',{tool:'call_list',leads:payload});
-      if(r.ok)setCallList(r.items);else setErr(r.error==='AI not configured'?aiOffMsg:'Could not rank the list.');
+      if(r.ok)setCallList(r.items);else setErr(r.capped?r.error:(r.error==='AI not configured'?aiOffMsg:'Could not rank the list.'));
     }catch(e){setErr('Could not reach the AI service (works on the deployed site).');}
     setBusy(null);
   };
@@ -2560,7 +2567,7 @@ function ImportModal({onClose,onImport}){
     setHeaders(hd); setRows(rw);
     const base={}; hd.forEach(h=>base[h]=guessField(h)); setMapping(base);
     setAi('reading');
-    (async()=>{ try{ const r=await fetch('/api/import-leads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({headers:hd,samples:rw.slice(0,6)})}); const j=await r.json();
+    (async()=>{ try{ const r=await api('/api/import-leads',{headers:hd,samples:rw.slice(0,6)}); const j=await r.json();
       if(j&&j.ok&&j.mapping){ const m={}; hd.forEach(h=>{const v=j.mapping[h];m[h]=(v&&IMPORT_KEYS.includes(v))?v:base[h];}); setMapping(m); setAi('done'); }
       else setAi('heuristic'); }catch(e){ setAi('heuristic'); } })();
   };
@@ -3187,7 +3194,7 @@ function Tasks({tasks,leads,me,upsertTask,deleteTask,saveTasks,open}){
     setBusy(true);
     try{
       const payload=open.map(t=>({id:t.id,title:t.title,notes:t.notes||'',owner:t.owner,lead:leadName(t.leadId),due:t.due||'',revenue:num(t.revenue),urgency:num(t.urgency),effort:num(t.effort)}));
-      const r=await fetch('/api/rank-tasks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tasks:payload})});
+      const r=await api('/api/rank-tasks',{tasks:payload});
       const j=await r.json();
       if(!j.ok){window.alert('AI ranking isn\u2019t available: '+(j.error||'unknown')+'.\nTasks are still sorted by impact \u00d7 urgency.');setBusy(false);return;}
       const map={}; (j.ranking||[]).forEach((x,i)=>{map[x.id]={rank:i+1,reason:x.reason||''};});
@@ -3390,7 +3397,7 @@ function TxnModal({txn,file,onSave,onDelete,onClose}){
   const [saving,setSaving]=useState(false);
   const set=p=>setD(x=>({...x,...p}));
   useEffect(()=>{ if(!file||txn) return; let go=true; (async()=>{ setAi('reading');
-    try{ const b64=await toB64(file); const r=await fetch('/api/parse-receipt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({file:b64,mime:file.type})}); const j=await r.json();
+    try{ const b64=await toB64(file); const r=await api('/api/parse-receipt',{file:b64,mime:file.type}); const j=await r.json();
       if(go&&j&&j.ok&&j.fields){ const f=j.fields; setD(x=>({...x,type:'expense',party:f.vendor||x.party,date:f.date||x.date,amount:f.total||x.amount,category:f.category||x.category,notes:f.summary||x.notes})); setAi('done'); }
       else if(go){ setAi('off'); } }
     catch(e){ if(go)setAi('off'); } })(); return ()=>{go=false;}; },[]);
@@ -4334,7 +4341,7 @@ function Huddle({leads,tasks,settings,stages,rels,saveSettings,me,open}){
   const cur=H.lastWeek, prev=H.weekBefore;
   const write=async()=>{ setErr(''); setBusy(true);
     try{
-      const r=await fetch('/api/huddle',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({digest:H,brand:BRAND.name})});
+      const r=await api('/api/huddle',{digest:H,brand:BRAND.name});
       const j=await r.json();
       if(!j.ok) throw new Error(j.error||'could not write the huddle');
       setBrief(j.brief);

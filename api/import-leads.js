@@ -2,8 +2,23 @@
 // It maps columns ONCE from the header + a few sample rows; the browser then applies that map to
 // every row (so a 500-row import is still a single cheap AI call). Requires ANTHROPIC_API_KEY.
 
+import { guard, sweep } from './_guard.js';
+import { checkBudget, recordSpend } from './_budget.js';
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
+  // One call maps a whole CSV, so the body carries header + sample rows.
+  // guard() handles OPTIONS and the POST-only check itself.
+  const gate = await guard(req, res, {
+    name: 'import-leads', perIp: 20, windowMin: 10, perDay: 600,
+    maxChars: 60000, requireAuth: true,
+  });
+  if (!gate.ok) return;
+  sweep();
+
+  // One ceiling for the whole install, checked before we spend. See _budget.js.
+  const over = await checkBudget();
+  if (over) { res.status(over.status).json(over.body); return; }
+
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { res.status(200).json({ ok: false, error: 'AI not configured' }); return; }
 
@@ -31,6 +46,9 @@ export default async function handler(req, res) {
     });
     if (!r.ok) { const t = await r.text(); res.status(200).json({ ok: false, error: 'AI request failed', detail: t.slice(0, 300) }); return; }
     const data = await r.json();
+    // Bill it to the shared ledger before we shape the reply — the tokens are
+    // spent either way, and an unrecorded call is a hole in the ceiling.
+    await recordSpend('claude-haiku-4-5-20251001', data && data.usage);
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').replace(/```json|```/g, '').trim();
     let mapping = null;
     try { mapping = JSON.parse(text); } catch { mapping = null; }
