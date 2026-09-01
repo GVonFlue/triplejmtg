@@ -2,14 +2,15 @@
 // Requires env var ANTHROPIC_API_KEY (set in Vercel → Project → Settings → Environment Variables).
 // The key NEVER reaches the browser; it only lives here on the server.
 
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // maxChars is huge on purpose: the body is a base64 image or PDF.
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'parse-receipt', perIp: 30, windowMin: 10, perDay: 900,
+    module: 'books',
     maxChars: 5000000, requireAuth: true,
   });
   if (!gate.ok) return;

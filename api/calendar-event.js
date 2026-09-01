@@ -2,7 +2,7 @@
 // POST body to create: { title, start, end, notes, attendees:[email], meet:bool, timezone }
 // POST body to delete: { action:'delete', eventId }
 // start/end are local wall-clock strings 'YYYY-MM-DDTHH:MM:SS'; timezone names the zone.
-import { guard, sweep } from './_guard.js';
+import { guard, sweep } from '@getproytech/core/guard';
 import { getAccessToken } from './_google.js';
 
 const CAL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';

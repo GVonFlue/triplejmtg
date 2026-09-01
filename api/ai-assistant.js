@@ -1,8 +1,8 @@
 // Dashboard "How do I…?" helper. Answers questions about USING the CRM only — it has
 // no access to loan data, so it's safe and cheap. Its knowledge is the guide below.
 // POST body: { question }  ->  { ok, answer }
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 const GUIDE = `
 You are the in-app help assistant for the ProyTech Business Suite — a CRM built for a mortgage loan officer (Triple J Mortgage). Answer ONLY questions about how to use the CRM. Keep answers short, friendly, and concrete (2-5 sentences). If asked something you can't know (a borrower's data, outside facts), say you only help with how to use the CRM. Never invent features that aren't listed here.
@@ -29,6 +29,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'ai-assistant', perIp: 30, windowMin: 10, perDay: 1000,
+    module: 'assistant',
     maxChars: 4000, requireAuth: true,
   });
   if (!gate.ok) return;

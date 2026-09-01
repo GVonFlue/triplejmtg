@@ -5,13 +5,14 @@
 // NOTE: the sister install (Dwellbusinesssuite PR #3) DELETED this endpoint as
 // live, LLM-calling and called by nothing. Here it is genuinely called, from
 // the Tasks screen (src/App.jsx). So it is guarded, not removed.
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'rank-tasks', perIp: 30, windowMin: 10, perDay: 900,
+    module: 'tasks',
     maxChars: 120000, requireAuth: true,
   });
   if (!gate.ok) return;

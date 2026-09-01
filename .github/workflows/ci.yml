@@ -1,0 +1,50 @@
+# TripleJ had no CI at all — `npm test` was something a person remembered to run,
+# and the three Vercel failures on PR #2 were the first signal that anything was
+# wrong with the dependency tree.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes an in-flight run on a PR. Never on main — those runs are
+# the record of whether the deployed commit was green.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 20, not latest, because that is what Vercel runs. proytech-core's own
+          # ci.yml records why this matters: on a newer Node the `tests/*.test.mjs`
+          # glob expanded differently and the suite passed zero tests while looking
+          # green. This repo's test script uses that same glob.
+          node-version: '20'
+          cache: npm
+
+      # The private scoped package resolves through the committed .npmrc, which
+      # reads ${NPM_TOKEN}. Without this env the install 404s and every job below
+      # it fails for a reason that looks nothing like the cause.
+      - run: npm ci
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Its own step, before the build, so the failure names itself. A local-path
+      # dependency has shipped three times; each time the build failed somewhere
+      # downstream and the message pointed at a corrupt tarball, not at the commit
+      # that caused it. This is also in `npm test`, which is what catches it on the
+      # author's machine before it is ever pushed.
+      - run: npx proytech-check-deps
+
+      - run: npm run build
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - run: npm test

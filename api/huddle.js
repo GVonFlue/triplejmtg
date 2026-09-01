@@ -9,14 +9,15 @@
 // is judgement rather than extraction, and it runs once a week, so the cost
 // difference is a rounding error.
 
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // Sonnet, weekly. Low per-IP ceiling because nobody needs six of these.
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'huddle', perIp: 6, windowMin: 10, perDay: 300,
+    module: 'huddle',
     maxChars: 60000, requireAuth: true,
   });
   if (!gate.ok) return;

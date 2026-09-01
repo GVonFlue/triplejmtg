@@ -22,8 +22,8 @@ async function claude(key, { system, user, max = 700 }) {
 }
 const parseJson = t => { try { return JSON.parse(t.replace(/```json|```/g, '').trim()); } catch { return null; } };
 
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // Bodies carry real borrower rows, so this was also a data-exfiltration
@@ -31,6 +31,7 @@ export default async function handler(req, res) {
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'ai-tools', perIp: 30, windowMin: 10, perDay: 900,
+    module: 'assistant',
     maxChars: 60000, requireAuth: true,
   });
   if (!gate.ok) return;

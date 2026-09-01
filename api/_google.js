@@ -8,6 +8,7 @@
 // The refresh token lives in a `secrets` table that Row Level Security blocks
 // from the browser; only the service-role key (here on the server) can read it.
 import { createClient } from '@supabase/supabase-js';
+import { supaUrl, supaKey } from '@getproytech/core/env';
 
 export const OAUTH_SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
@@ -20,8 +21,17 @@ export const appUrl = () => process.env.APP_URL || 'https://proytech-crm.vercel.
 export const redirectUri = () => process.env.GOOGLE_REDIRECT_URI || (appUrl() + '/api/google-callback');
 
 function store() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  /* THIS FILE WAS THE BUG THE SHARED env MODULE WAS WRITTEN ABOUT.
+     It read SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and accepted neither
+     VITE_SUPABASE_URL nor the shorter SUPABASE_SERVICE_KEY spelling — while
+     every other server file accepted both. An install that followed its own
+     docs got a working assistant, a working rate limiter, and a Google
+     integration that silently could not read its own token. Nothing errored.
+
+     One import closes it, and keeps it closed: there is now exactly one place
+     that knows how to find Supabase from the server. */
+  const url = supaUrl();
+  const key = supaKey();
   if (!url || !key) return null;
   return createClient(url, key, { auth: { persistSession: false } });
 }

@@ -28,7 +28,7 @@
 // were deleted with this change. They were unreferenced duplicates of the three
 // branches below — the merge described above added google.js but never removed
 // the originals, so they were still deployed, still routable, and still open.
-import { guard, sweep } from './_guard.js';
+import { guard, sweep } from '@getproytech/core/guard';
 import { OAUTH_SCOPES, redirectUri, loadGoogle, clearGoogle } from './_google.js';
 
 async function doAuth(req, res) {
@@ -69,10 +69,12 @@ async function doStatus(req, res) {
 }
 
 async function doDisconnect(req, res) {
-  // requireManager implies requireAuth. Tiny body: an action with no arguments.
+  // requireAdmin implies requireAuth. Tiny body: an action with no arguments.
+  // WHICH role counts as an admin here is ADMIN_ROLES=manager on the deployment,
+  // not a name in this file — see @proytech/core README.
   const gate = await guard(req, res, {
     name: 'google-disconnect', perIp: 10, windowMin: 10, perDay: 100,
-    maxChars: 500, requireManager: true,
+    maxChars: 500, requireAdmin: true,
   });
   if (!gate.ok) return;
   sweep();

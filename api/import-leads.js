@@ -2,14 +2,15 @@
 // It maps columns ONCE from the header + a few sample rows; the browser then applies that map to
 // every row (so a 500-row import is still a single cheap AI call). Requires ANTHROPIC_API_KEY.
 
-import { guard, sweep } from './_guard.js';
-import { checkBudget, recordSpend } from './_budget.js';
+import { guard, sweep } from '@getproytech/core/guard';
+import { checkBudget, recordSpend } from '@getproytech/core/budget';
 
 export default async function handler(req, res) {
   // One call maps a whole CSV, so the body carries header + sample rows.
   // guard() handles OPTIONS and the POST-only check itself.
   const gate = await guard(req, res, {
     name: 'import-leads', perIp: 20, windowMin: 10, perDay: 600,
+    module: 'leads',
     maxChars: 60000, requireAuth: true,
   });
   if (!gate.ok) return;

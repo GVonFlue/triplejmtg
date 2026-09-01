@@ -1,205 +1,117 @@
 /* ============================================================================
-   tests/guard.test.mjs — the claims this change makes, checked.
+   tests/guard.test.mjs — is THIS repo wired to the shared platform correctly?
 
-   These are the assertions that would have caught the state this repo was in:
-   fifteen routes reachable by anyone with the URL, six of them calling
-   api.anthropic.com on a key somebody pays for.
+   WHAT MOVED, AND WHY THIS FILE SHRANK.
+   -------------------------------------
+   The behaviour of the guard and the spend ceiling — 401 on a missing token,
+   403 on a wrong role, failing closed on an unreadable ledger, the rate card —
+   is now tested in @getproytech/core, once, against all three installs' rules. It
+   was tested here too, in a copy, and that copy would have drifted from the
+   package the first time either changed. Duplicated tests are the same problem
+   as duplicated code, one layer up.
 
-   Run with:  node --test tests/
-   No network, no database, no Supabase project. Every fetch is stubbed.
+   WHAT STAYED IS WHAT ONLY THIS REPO CAN GET WRONG:
+
+     * a route that forgets to call guard() at all — the exact state this repo
+       was in, with fifteen functions open to the internet
+     * a route reaching for the deleted local copies instead of the package
+     * a frontend call site that does not send the token, which is what would
+       have turned "secured" into "every AI feature broken"
+
+   Run with: npm test
    ========================================================================== */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-/* SET BEFORE ANY api/ MODULE IS IMPORTED.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const API = join(ROOT, 'api');
 
-   api/_env.js reads process.env at module-load time and every other server file
-   imports its constants from there. Assigning process.env inside a test is
-   therefore too late: _env.js has already resolved. Cache-busting the module
-   under test does not help either, because its import of './_spend.js' resolves
-   to the instance already in the graph.
+/** Routes Vercel exposes: every .js in api/ that does not start with _. */
+const routes = () => readdirSync(API).filter(f => f.endsWith('.js') && !f.startsWith('_'));
 
-   So the Supabase pair is fixed here, once, for the whole file. Only the
-   variables read directly by the module under test (AI_BUDGET,
-   AI_BUDGET_FAIL_OPEN) can vary per case, and those are cache-busted below. */
-process.env.SUPABASE_URL = 'https://example.supabase.co';
-process.env.SUPABASE_SERVICE_KEY = 'service-key';
+/* google-callback.js is the one deliberate exception. It is the redirect URI
+   registered in Google Cloud and is hit by Google's own servers, which cannot
+   carry a Supabase token — guard() would 401 the OAuth handshake itself. Listed
+   by name so adding a second exception is a decision somebody has to write
+   down, rather than something that quietly happens. */
+const UNGUARDED_ON_PURPOSE = new Set(['google-callback.js']);
 
-/* --------------------------------------------------------------- harness */
-function mockRes() {
-  const r = { statusCode: 0, body: null, headers: {}, ended: false };
-  r.status = c => { r.statusCode = c; return r; };
-  r.json = b => { r.body = b; r.ended = true; return r; };
-  r.end = () => { r.ended = true; return r; };
-  r.setHeader = (k, v) => { r.headers[k] = v; };
-  return r;
-}
-const post = (body = {}, headers = {}) => ({ method: 'POST', headers, body, socket: {} });
+test('every route calls guard(), or is an admitted exception', () => {
+  const open = routes().filter(f =>
+    !UNGUARDED_ON_PURPOSE.has(f) && !/\bguard\(/.test(readFileSync(join(API, f), 'utf8')));
+  assert.deepEqual(open, [],
+    `these routes are reachable by anyone with the URL: ${open.join(', ')}`);
+});
 
-/* Load a module with a controlled environment and a stubbed global fetch.
-   Cache-busted so a case that changes AI_BUDGET gets its own constants.
+test('every AI route checks the budget before it spends', () => {
+  const spending = routes().filter(f => readFileSync(join(API, f), 'utf8').includes('api.anthropic.com'));
+  assert.ok(spending.length >= 6, 'expected the six known AI routes; did one get renamed?');
+  const unmetered = spending.filter(f => !readFileSync(join(API, f), 'utf8').includes('checkBudget'));
+  assert.deepEqual(unmetered, [],
+    `these call Anthropic without asking the ceiling first: ${unmetered.join(', ')}`);
+});
 
-   fetch is left installed on globalThis rather than restored, because it is
-   read at CALL time and the returned module holds no reference to it. */
-let bust = 0;
-async function load(path, env = {}, fetchImpl = async () => { throw new Error('no network in tests'); }) {
-  for (const [k, v] of Object.entries(env)) process.env[k] = v;
-  globalThis.fetch = fetchImpl;
-  try {
-    return await import(`../api/${path}?t=${bust++}`);
-  } finally {
-    for (const k of Object.keys(env)) delete process.env[k];
+test('nothing imports the deleted local copies', () => {
+  // _guard.js, _env.js, _spend.js and _budget.js now live in @getproytech/core.
+  // A leftover relative import would resolve to nothing and fail at runtime, in
+  // production, on the first request rather than at build time.
+  for (const f of readdirSync(API).filter(n => n.endsWith('.js'))) {
+    const src = readFileSync(join(API, f), 'utf8');
+    assert.doesNotMatch(src, /from '\.\/_(guard|env|spend|budget)\.js'/,
+      `api/${f} still imports a local platform file that no longer exists`);
   }
-}
-
-/* Kept as an empty marker so each call site still reads as "with Supabase
-   configured" — the actual values are pinned at the top of the file. */
-const SUPA = {};
-
-/* ============================================================ the guard */
-
-test('guard: a request with no Authorization header is refused with 401', async () => {
-  const { guard } = await load('_guard.js', SUPA);
-  const res = mockRes();
-  const gate = await guard(post({ question: 'hi' }), res, { name: 't', requireAuth: true });
-  assert.equal(gate.ok, false);
-  assert.equal(res.statusCode, 401);
-  assert.match(res.body.error, /Sign in/i);
 });
 
-test('guard: a token Supabase rejects is refused, and the caller is not told why', async () => {
-  const { guard } = await load('_guard.js', SUPA, async () => ({ ok: false, status: 401, json: async () => null }));
-  const res = mockRes();
-  const gate = await guard(post({}, { authorization: 'Bearer forged' }), res, { name: 't', requireAuth: true });
-  assert.equal(gate.ok, false);
-  assert.equal(res.statusCode, 401);
-  // Vague to the caller on purpose: an attacker learns nothing about which of
-  // the four possible failures they hit. The detail goes to the server log.
-  assert.equal(res.body.error, 'Session expired.');
+test('platform code is imported from the package, not re-copied', () => {
+  const local = readdirSync(API).filter(f => ['_guard.js', '_env.js', '_spend.js', '_budget.js'].includes(f));
+  assert.deepEqual(local, [],
+    `these are back as local copies and will drift from the package: ${local.join(', ')}`);
 });
 
-test('guard: auth is checked BEFORE the counters, so a stranger cannot burn the day\'s budget', async () => {
-  let supabaseCalls = 0;
-  const { guard } = await load('_guard.js', SUPA, async url => {
-    supabaseCalls++;
-    assert.ok(!String(url).includes('api_hits'), 'no counter row should be written for an unauthenticated caller');
-    return { ok: false, status: 401, json: async () => null };
-  });
-  const res = mockRes();
-  await guard(post({}, { authorization: 'Bearer forged' }), res, { name: 't', requireAuth: true });
-  assert.equal(supabaseCalls, 1);
+test('every sellable route declares the module it belongs to', () => {
+  // A route with no `module:` can never be gated, so the tier that is sold on
+  // it is unenforceable — the tab hides and the endpoint keeps answering. These
+  // are the routes that belong to a section on the price list.
+  const SELLABLE = ['ai-assistant.js', 'ai-tools.js', 'huddle.js', 'rank-tasks.js',
+                    'parse-receipt.js', 'import-leads.js', 'gmail-draft.js'];
+  const ungated = SELLABLE.filter(f => !/module: '[a-z-]+'/.test(readFileSync(join(API, f), 'utf8')));
+  assert.deepEqual(ungated, [],
+    `these belong to a sellable section but declare no module: ${ungated.join(', ')}`);
 });
 
-test('guard: a body over maxChars is refused with 413 and both numbers', async () => {
-  const { guard } = await load('_guard.js', SUPA);
-  const res = mockRes();
-  const gate = await guard(post({ blob: 'x'.repeat(9000) }), res, { name: 't', maxChars: 500 });
-  assert.equal(gate.ok, false);
-  assert.equal(res.statusCode, 413);
-  assert.equal(res.body.limit, 500);
-  assert.ok(res.body.chars > 9000);
-  assert.ok(res.body.over > 0);
+test('no route asks for a role by name', () => {
+  // Which role is an admin is ADMIN_ROLES on the deployment. A hardcoded name
+  // here is the bug that shipped into Dwell asking for 'owner' and matching
+  // nobody — it does not error, it just refuses everyone, quietly, for months.
+  for (const f of routes()) {
+    const src = readFileSync(join(API, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    assert.doesNotMatch(src, /requireManager|requireOwner|requireLeader/,
+      `api/${f} names a role in code — use requireAdmin and set ADMIN_ROLES`);
+  }
 });
 
-test('guard: GET is refused — every guarded route is POST-only', async () => {
-  const { guard } = await load('_guard.js', SUPA);
-  const res = mockRes();
-  const gate = await guard({ method: 'GET', headers: {}, socket: {} }, res, { name: 't' });
-  assert.equal(gate.ok, false);
-  assert.equal(res.statusCode, 405);
+test('no browser call to /api bypasses the token helper', () => {
+  // api() in src/lib/supabase.js attaches the Supabase access token. A bare
+  // fetch to a guarded route is a 401 the screen renders as nothing at all,
+  // because these endpoints answer 200 with { ok:false } for most failures.
+  const src = readFileSync(join(ROOT, 'src', 'App.jsx'), 'utf8');
+  const bare = [...src.matchAll(/fetch\(\s*['"`]\/api\//g)];
+  assert.equal(bare.length, 0,
+    `${bare.length} call site(s) use a bare fetch to /api — route them through api()`);
 });
 
-test('guard: isManager asks Postgres and does NOT trust a role in the body', async () => {
-  const { isManager } = await load('_guard.js', SUPA,
-    async (url, opts) => {
-      assert.match(String(url), /rpc\/crm_whoami/);
-      // The caller's OWN token is what crm_whoami() resolves, not the service key.
-      assert.match(String(opts.headers.authorization), /Bearer officer-token/);
-      return { ok: true, json: async () => [{ role: 'officer', active: true }] };
-    });
-  assert.equal(await isManager('officer-token'), false);
-});
-
-test('guard: isManager fails CLOSED when the role cannot be proved', async () => {
-  const { isManager } = await load('_guard.js', SUPA, async () => { throw new Error('supabase down'); });
-  assert.equal(await isManager('any-token'), false, 'an unprovable role is not permission');
-});
-
-/* =========================================================== the budget */
-
-test('budget: defaults to $15 for a client install', async () => {
-  const { BUDGET } = await load('_budget.js', SUPA);
-  assert.equal(BUDGET, 15);
-});
-
-test('budget: AI_BUDGET overrides the default', async () => {
-  const { BUDGET } = await load('_budget.js', { ...SUPA, AI_BUDGET: '40' });
-  assert.equal(BUDGET, 40);
-});
-
-test('budget: refuses once the month is spent, and says so in words a user understands', async () => {
-  const { checkBudget } = await load('_budget.js', SUPA,
-    async () => ({ ok: true, text: async () => JSON.stringify([{ cost: 9 }, { cost: 6.5 }]) }));
-  const over = await checkBudget();
-  assert.ok(over, 'a $15.50 month against a $15 cap must be refused');
-  assert.equal(over.body.capped, true);
-  assert.equal(over.body.spent, 15.5);
-  assert.match(over.body.error, /resets on the 1st/);
-  assert.match(over.body.error, /Everything else in the CRM works/,
-    'the message must tell them the rest of the app still works');
-});
-
-test('budget: allows a call while there is room left', async () => {
-  const { checkBudget } = await load('_budget.js', SUPA,
-    async () => ({ ok: true, text: async () => JSON.stringify([{ cost: 3.2 }]) }));
-  assert.equal(await checkBudget(), null);
-});
-
-test('budget: FAILS CLOSED when the ledger cannot be read', async () => {
-  // This is the case the sister install decides the other way. An unreadable
-  // ledger means we do not know what has been spent; on a client's key that
-  // must not resolve to "spend more".
-  const { checkBudget } = await load('_budget.js', SUPA, async () => { throw new Error('supabase down'); });
-  const over = await checkBudget();
-  assert.ok(over, 'an unreadable ledger must refuse, not allow');
-  assert.equal(over.body.capped, true);
-  assert.match(over.body.error, /Nothing has been charged/);
-});
-
-test('budget: AI_BUDGET_FAIL_OPEN=true restores the old behaviour, deliberately', async () => {
-  const { checkBudget } = await load('_budget.js', { ...SUPA, AI_BUDGET_FAIL_OPEN: 'true' },
-    async () => { throw new Error('supabase down'); });
-  assert.equal(await checkBudget(), null);
-});
-
-/* NOT TESTED HERE, deliberately: the "no Supabase credentials at all" branch of
-   checkBudget(). _env.js resolves those at module-load time for the whole
-   process, so exercising it needs a child process with a different environment,
-   not a re-import. It is a three-line branch that returns the same shape as the
-   unreadable-ledger case above, which IS covered. Worth a child-process test
-   when this file grows one; noted rather than silently skipped. */
-
-test('budget: the overshoot past the cap is bounded by one call, not unbounded', async () => {
-  const { MAX_CALL, BUDGET } = await load('_budget.js', SUPA);
-  // The check happens before the call, so the call that crosses the line still
-  // runs. This asserts the documented bound is a real number and a small one.
-  assert.ok(MAX_CALL > 0 && MAX_CALL <= 0.25);
-  assert.ok(MAX_CALL / BUDGET < 0.02, 'worst-case overshoot must be under 2% of the budget');
-});
-
-/* ============================================================ the rates */
-
-test('spend: costOf prices a cached read at a tenth of fresh input', async () => {
-  const { costOf } = await load('_spend.js', SUPA);
-  const fresh = costOf('claude-haiku-4-5-20251001', { input_tokens: 1e6 });
-  const cached = costOf('claude-haiku-4-5-20251001', { cache_read_input_tokens: 1e6 });
-  assert.equal(fresh, 1);
-  assert.ok(Math.abs(cached - 0.1) < 1e-9);
-});
-
-test('spend: an unknown model still costs something, rather than nothing', async () => {
-  const { costOf } = await load('_spend.js', SUPA);
-  // A model id we do not have a rate card for must not silently price at zero —
-  // that is a hole in the ceiling that opens the day a model is renamed.
-  assert.ok(costOf('claude-some-future-model', { input_tokens: 1e6, output_tokens: 1e6 }) > 0);
+test('the .npmrc that resolves the private package is committed', () => {
+  // Without it npm falls through to PUBLIC npm. The @getproytech scope IS ours
+  // there, which is what keeps that fall-through a clean 404 rather than an
+  // install of somebody else's code next to a service key — and it is why
+  // nothing named 'core' is published publicly: a real-but-empty package would
+  // turn this loud build failure into a green deploy that 500s at runtime.
+  const npmrc = readFileSync(join(ROOT, '.npmrc'), 'utf8');
+  assert.match(npmrc, /@getproytech:registry=https:\/\/npm\.pkg\.github\.com/);
+  assert.match(npmrc, /_authToken=\$\{NPM_TOKEN\}/,
+    'the token must come from the environment, never be committed');
+  assert.doesNotMatch(npmrc, /ghp_|github_pat_/, 'a real token is committed in .npmrc');
 });
